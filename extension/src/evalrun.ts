@@ -63,6 +63,29 @@ export async function runEval(
   const results: Record<string, Record<string, any>> = {};
   let modelUsed = '';
 
+  // Resolve ONCE — both arms must face the same model, or the comparison is
+  // not a comparison. The resolved model is threaded into every chat() below.
+  const resolved = await llm.resolveActive();
+
+  // A model whose context window cannot hold the RAW arm silently rigs the
+  // experiment in the index arm's favour: the baseline errors, scores 0, and
+  // the index arm "wins" on context size rather than on structure. That is the
+  // exact false-confidence failure this tool exists to argue against, so refuse
+  // the run instead of reporting it. (Estimate chars/4 — rough, hence the 10%
+  // margin; we only need to catch "does not remotely fit".)
+  if (resolved?.maxInputTokens) {
+    const tooBig = armNames
+      .map(a => ({ a, est: Math.round(A.arms[a].context.length / 4) }))
+      .filter(x => x.est > resolved.maxInputTokens! * 0.9);
+    if (tooBig.length) {
+      throw new Error(
+        `The selected model (${resolved.id}) has a ${resolved.maxInputTokens.toLocaleString()}-token ` +
+        `context window, which cannot hold ${tooBig.map(x => `the "${x.a}" arm (~${x.est.toLocaleString()} tokens)`).join(' or ')}. ` +
+        `That arm would fail and the comparison would be meaningless — a win by truncation, not by structure.\n\n` +
+        `Pick a larger model with "codevis: Select language model" and run this again.`);
+    }
+  }
+
   const total = armNames.length * A.questions.length;
   let done = 0;
 
@@ -83,7 +106,7 @@ export async function runEval(
           let got: string[] = [];
           let raw = '';
           try {
-            const r = await llm.chat(SYSTEM, user, token);
+            const r = await llm.chat(SYSTEM, user, token, resolved);
             raw = r.text; modelUsed = r.model;
             const p = parseJsonLoose<{ answer: string[] }>(raw);
             got = Array.isArray(p?.answer) ? p!.answer.map(String) : [];
@@ -101,7 +124,11 @@ export async function runEval(
   // ---- report ------------------------------------------------------------
   const L: string[] = [];
   L.push(`# codevis A/B eval — ${A.root}`);
-  L.push(`\nModel: \`${modelUsed}\` · ${new Date().toISOString()}`);
+  L.push(`\nModel: \`${modelUsed}\`` +
+         (resolved?.maxInputTokens
+           ? ` (${resolved.maxInputTokens.toLocaleString()}-token context — both arms fit)`
+           : '') +
+         ` · ${new Date().toISOString()}`);
   L.push(`\nBoth arms received the same questions and the same model. Only the`);
   L.push(`context differed. Answers are sets; scoring is precision/recall/F1.`);
   L.push(`The answer key was recomputed from source by \`eval/facts.py\` and never`);

@@ -17,8 +17,10 @@ import * as vscode from 'vscode';
 export type ChatResult = { text: string; model: string };
 
 /** An already-resolved model choice. `id` is the stable spelling used in cache
- * keys ("vendor/family"); `handle` is whatever the client needs to run it. */
-export type ResolvedModel = { id: string; handle?: unknown };
+ * keys ("vendor/family"); `handle` is whatever the client needs to run it.
+ * `maxInputTokens` is the context window when the provider reports one — the
+ * eval needs it to refuse a run whose baseline arm cannot physically fit. */
+export type ResolvedModel = { id: string; handle?: unknown; maxInputTokens?: number };
 
 export interface LLMClient {
   available(): Promise<boolean>;
@@ -189,7 +191,7 @@ export class VSCodeLM implements LLMClient {
 
   async resolveActive(): Promise<ResolvedModel | undefined> {
     const m = await this.resolve();
-    return m ? { id: describe(m), handle: m } : undefined;
+    return m ? { id: describe(m), handle: m, maxInputTokens: m.maxInputTokens } : undefined;
   }
 
   async chat(system: string, user: string, token: vscode.CancellationToken,
