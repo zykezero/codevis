@@ -15,7 +15,7 @@ from pathlib import Path
 from tree_sitter_languages import get_parser
 
 import dataflow_r
-from schema import Edge, Index, Reference, Span, Symbol
+from schema import Edge, Index, Reference, Span, Symbol, source_files
 
 PARSER = get_parser("r")
 
@@ -97,16 +97,17 @@ def _is_package_arg(src, node):
 
 def build_index(root: Path) -> Index:
     root = root.resolve()
-    files = sorted(root.rglob("*.R"))
+    files = source_files(root, ".r")   # case-insensitive: .R and .r
     idx = Index(language="r", root=root.name)
-    for f in files:
-        idx.files[f.relative_to(root).as_posix()] = f.read_text(encoding="utf8")
 
     trees, sources = {}, {}
     for f in files:
         src = f.read_bytes()
         sources[f] = src
         trees[f] = PARSER.parse(src)
+        # decode from the bytes already read — "replace" so a stray non-UTF-8
+        # byte degrades one character instead of killing the whole index
+        idx.files[f.relative_to(root).as_posix()] = src.decode("utf8", "replace")
 
     # ---- pass 1: global definitions (R sources into one global env) -----------
     # R has no imports: source() drops everything into one environment, so a global
@@ -240,7 +241,18 @@ def build_index(root: Path) -> Index:
 
             if ref.target_kind == "project" and ref.enclosing and ref.resolves_to:
                 kind = "reads" if kind_of.get(ref.resolves_to) == "variable" else "calls"
-                idx.edges.append(Edge(ref.enclosing, ref.resolves_to, kind))
+                # one edge per (caller, callee), call sites accumulated — same
+                # behaviour as the Python front-end. A fresh edge per occurrence
+                # drew stacked lines and left "Describe" unable to find a site.
+                prev = next((e for e in idx.edges
+                             if e.from_symbol == ref.enclosing
+                             and e.to_symbol == ref.resolves_to and e.kind == kind), None)
+                if prev:
+                    prev.call_sites.append(ref.span)
+                else:
+                    e = Edge(ref.enclosing, ref.resolves_to, kind)
+                    e.call_sites.append(ref.span)
+                    idx.edges.append(e)
 
     module_level = {ref.resolves_to for ref in idx.references
                     if ref.enclosing is None and ref.resolves_to}

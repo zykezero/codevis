@@ -28,3 +28,6 @@ eval/arms.json
 eval/facts.json
 eval/results.json
 eval/RESULTS.md
+
+# Debug / scratch scripts
+debug/

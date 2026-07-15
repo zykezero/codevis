@@ -10,7 +10,7 @@ from pathlib import Path
 import jedi
 
 import dataflow_py
-from schema import Edge, Index, Param, Reference, Span, Symbol
+from schema import Edge, Index, Param, Reference, Span, Symbol, read_source, source_files
 
 DEF_KINDS = {"function": "function", "class": "class", "statement": "variable"}
 
@@ -68,35 +68,19 @@ def _signature(fn):
     return f"{fn.name}({', '.join(parts)}){ret}", params
 
 
-def _ast_bodies(path):
-    """(name, def_line) -> (block_start_line, block_end_line, docstring).
-
-    Spans are mechanical (D2 layer 1) — take them from `ast`, not from the
-    resolver. Decorators are included so a card shows the whole definition.
-    """
-    out = {}
-    try:
-        tree = ast.parse(path.read_text(encoding="utf8"))
-    except SyntaxError:
-        return out
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        start = node.lineno
-        if node.decorator_list:
-            start = min(d.lineno for d in node.decorator_list)
-        doc = (ast.get_docstring(node) or "").strip().split("\n")[0]
-        out[(node.name, node.lineno)] = (start, node.end_lineno or node.lineno, doc)
-    return out
-
-
 def build_index(root: Path) -> Index:
     root = root.resolve()
     project = jedi.Project(root)
-    files = sorted(p for p in root.rglob("*.py") if "__pycache__" not in str(p))
+    # read each file exactly once; an undecodable file is skipped, not fatal
+    texts = {}
+    for f in source_files(root, ".py"):
+        t = read_source(f)
+        if t is not None:
+            texts[f] = t
+    files = sorted(texts)
     idx = Index(language="python", root=root.name)
     for f in files:
-        idx.files[f.relative_to(root).as_posix()] = f.read_text(encoding="utf8")
+        idx.files[f.relative_to(root).as_posix()] = texts[f]
 
     # ---- pass 1: definitions (from ast — authoritative about what THIS file defines)
     # Jedi's get_names(definitions=True) also reports imported names as definitions,
@@ -105,9 +89,10 @@ def build_index(root: Path) -> Index:
     for f in files:
         rel = f.relative_to(root).as_posix()
         try:
-            tree = ast.parse(f.read_text(encoding="utf8"))
+            tree = ast.parse(texts[f])
         except SyntaxError:
             continue
+        src_lines = texts[f].split("\n")
 
         def visit(node, prefix, cls=None):
             for child in ast.iter_child_nodes(node):
@@ -130,7 +115,6 @@ def build_index(root: Path) -> Index:
                         sig, params = child.name, []
                     else:
                         sig, params = _signature(child)
-                    src_lines = f.read_text(encoding="utf8").split("\n")
                     snippet = "\n".join(src_lines[body_start - 1:child.end_lineno])
                     chash = hashlib.sha1(
                         re.sub(r"\s+", " ", snippet).strip().encode()).hexdigest()[:12]

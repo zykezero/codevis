@@ -23,7 +23,7 @@ import sqlglot
 from sqlglot import exp
 
 from schema import (CONSUMES, HAS_COL, PRODUCES, READS_COL, WRITES_COL,
-                    Edge, Index, Reference, Span, Symbol)
+                    Edge, Index, Reference, Span, Symbol, read_source, source_files)
 
 DIALECT = None   # sqlglot's permissive default parses most dialects
 
@@ -52,12 +52,17 @@ def _stmt_name(stmt, i):
 
 def build_index(root: Path) -> Index:
     root = root.resolve()
-    files = sorted(root.rglob("*.sql"))
+    texts = {}
+    for f in source_files(root, ".sql"):
+        t = read_source(f)
+        if t is not None:
+            texts[f] = t
+    files = sorted(texts)
     idx = Index(language="sql", root=root.name)
     seen = set()
 
     for f in files:
-        idx.files[f.relative_to(root).as_posix()] = f.read_text(encoding="utf8")
+        idx.files[f.relative_to(root).as_posix()] = texts[f]
 
     def node(kind, key, name, sp, detail=""):
         sid = f"{kind}::{key}"
@@ -66,24 +71,31 @@ def build_index(root: Path) -> Index:
             idx.symbols.append(Symbol(sid, name, key, kind, sp, sp, detail))
         return sid
 
+    edge_keys = set()
+
     def add(a, b, kind, detail=""):
-        if not any(x.from_symbol == a and x.to_symbol == b and x.kind == kind
-                   for x in idx.edges):
+        k = (a, b, kind)
+        if k not in edge_keys:
+            edge_keys.add(k)
             idx.edges.append(Edge(a, b, kind, detail))
 
     for f in files:
         rel = f.relative_to(root).as_posix()
-        text = f.read_text(encoding="utf8")
+        text = texts[f]
         lines = text.split("\n")
         try:
             statements = sqlglot.parse(text, dialect=DIALECT)
         except Exception:
             continue
 
-        # locate each statement's first line, for the card's body span
+        # locate each statement's first line, for the card's body span.
+        # offsets is indexed by position in the FULL statement list below, so a
+        # None statement (a stray semicolon, a comment-only statement) must
+        # still occupy a slot — skipping it shifted every later span.
         offsets, cursor = [], 0
         for stmt in statements:
             if stmt is None:
+                offsets.append(None)
                 continue
             sql_txt = stmt.sql(dialect=DIALECT)
             head = sql_txt.split()[0] if sql_txt.split() else ""
@@ -171,10 +183,7 @@ def build_index(root: Path) -> Index:
                 cid = node("column", c.name, c.name, sp)
                 add(stmt_sid, cid, READS_COL)
 
-            # ---- references: make table/column tokens clickable in the source
-            for t in stmt.find_all(exp.Table):
-                pass   # spans below are recovered by text scan
-
+    # references (clickable table/column tokens) are recovered by text scan
     _add_references(idx, root, files)
     return idx
 

@@ -5,8 +5,45 @@ allowed to know whether it is looking at Python or R.
 """
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Optional
+
+# Directories no front-end should descend into. An in-tree virtualenv is the
+# single most likely thing a new user has, and indexing it drags thousands of
+# third-party files through the resolver.
+EXCLUDED_DIRS = {".venv", "venv", ".git", "node_modules", ".tox", "build", "dist",
+                 ".mypy_cache", ".pytest_cache", "__pycache__"}
+
+
+def source_files(root: Path, *exts: str) -> list[Path]:
+    """Every file under `root` with one of `exts` (matched case-insensitively,
+    so `.r` finds both `.R` and `.r`), skipping EXCLUDED_DIRS and hidden
+    directories. Directories are pruned, not filtered after the fact, so a
+    large `.venv` costs nothing to skip. Sorted, for reproducible output."""
+    want = {e.lower() for e in exts}
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in EXCLUDED_DIRS and not d.startswith(".")]
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            if p.suffix.lower() in want:
+                out.append(p)
+    return sorted(out)
+
+
+def read_source(path: Path) -> Optional[str]:
+    """The file's text, or None when it is not valid UTF-8. One Latin-1 file or
+    a UTF-16 SQL dump must skip THAT file, not abort the whole index — same
+    posture as a missing language dependency: warn to stderr and continue."""
+    try:
+        return path.read_text(encoding="utf8")
+    except (UnicodeDecodeError, OSError) as e:
+        print(f"warning: skipping {path} — {e}", file=sys.stderr)
+        return None
 
 
 @dataclass(frozen=True)

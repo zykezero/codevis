@@ -170,6 +170,21 @@ def main():
             continue
         lang = idx.language
 
+        # --- determinism: the same source must index identically across runs ---
+        # (an arbitrary winner pulled out of a set once made produces/consumes
+        # edges flip between same-named functions). Two COLD processes, because
+        # that is what re-running actually is — and each gets a fresh hash seed,
+        # which is exactly the thing that reorders unsorted set iteration. An
+        # in-process rebuild would test the wrong thing: jedi's warm caches
+        # legitimately resolve a few more external names on a second pass.
+        runs = []
+        for _ in range(2):
+            r = subprocess.run([sys.executable, str(HERE / "codevis.py"),
+                                str(fx), "--emit-json"],
+                               capture_output=True, text=True)
+            runs.append(r.stdout)
+        deterministic = bool(runs[0].strip()) and runs[0] == runs[1]
+
         # --- 2. span alignment -------------------------------------------------
         misaligned = 0
         for r in idx.references:
@@ -263,12 +278,13 @@ def main():
         ext_ok = ext["syntax"] == 0 and ext.get("appOk") == 0 and ext.get("roundtrip") == 0
         ok = (misaligned == 0 and dangling == 0 and badedge == 0
               and render["bad"] == 0 and render["leaks"] == 0
-              and boot["boot"] == "ok" and ext_ok)
+              and boot["boot"] == "ok" and ext_ok and deterministic)
         failures += 0 if ok else 1
         mark = "PASS" if ok else "FAIL"
         print(f"[{mark}] {fx.name:<14} {lang:<7} "
               f"{render['symbols']:>3} symbols | boot: {boot['boot']:<6} | "
               f"ext-html: {'ok' if ext_ok else 'BROKEN'} | "
+              f"deterministic: {'yes' if deterministic else 'NO'} | "
               f"spans: {misaligned} | dangling: {dangling} | "
               f"edges: {badedge} | text: {render['bad']} | leaks: {render['leaks']}")
         if boot["boot"] != "ok":

@@ -167,6 +167,24 @@ def _propagate(fn, data_fns, seed):
     return ev
 
 
+def _functions_with_quals(tree):
+    """[(fn_node, qualname)] — the same qualname construction as the front-end's
+    pass 1, so a method's id (`file.py::Class.method`) can be looked up exactly
+    instead of suffix-matched (which silently missed every method)."""
+    out = []
+
+    def visit(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                qual = f"{prefix}.{child.name}" if prefix else child.name
+                if not isinstance(child, ast.ClassDef):
+                    out.append((child, qual))
+                visit(child, qual)
+
+    visit(tree, "")
+    return out
+
+
 def extract(idx, root, files, sym_ids):
     """Mutate `idx` in place: add dataset + column symbols and their edges."""
     seen = {}
@@ -178,17 +196,39 @@ def extract(idx, root, files, sym_ids):
             idx.symbols.append(Symbol(sid, name, key, kind, span, span, detail))
         return sid
 
+    edge_keys = {(e.from_symbol, e.to_symbol, e.kind) for e in idx.edges}
+
     def add(a, b, kind, detail=""):
-        e = Edge(a, b, kind, detail)
-        if not any(x.from_symbol == a and x.to_symbol == b and x.kind == kind for x in idx.edges):
-            idx.edges.append(e)
+        k = (a, b, kind)
+        if k not in edge_keys:
+            edge_keys.add(k)
+            idx.edges.append(Edge(a, b, kind, detail))
+
+    # code symbol ids are "<relpath>::<qualname>" — index them two ways:
+    # exact (relpath, qualname) for the enclosing-function lookup, and by bare
+    # name for callee resolution. A bare name that maps to MORE than one symbol
+    # links to nothing: an arbitrary winner from set iteration order made the
+    # same codebase index differently across runs, and a false link is worse
+    # than no link.
+    by_qual, by_name = {}, {}
+    for s in sym_ids:
+        if "::" not in s:
+            continue
+        rel_, qual = s.split("::", 1)
+        by_qual[(rel_, qual)] = s
+        by_name.setdefault(qual.rsplit(".", 1)[-1], set()).add(s)
+
+    def unique(name):
+        hits = by_name.get(name)
+        return next(iter(hits)) if hits and len(hits) == 1 else None
 
     # pass 0: which functions handle data at all?
     trees = {}
     for f in files:
+        rel = f.relative_to(root).as_posix()
         try:
-            trees[f.relative_to(root).as_posix()] = ast.parse(f.read_text(encoding="utf8"))
-        except SyntaxError:
+            trees[rel] = ast.parse(idx.files.get(rel) or f.read_text(encoding="utf8"))
+        except (SyntaxError, UnicodeDecodeError, OSError):
             pass
     data_fns = _data_functions(trees)
 
@@ -210,10 +250,8 @@ def extract(idx, root, files, sym_ids):
                                if isinstance(v, ast.Constant) and isinstance(v.value, str))
             return None
 
-        for fn in [n for n in ast.walk(tree)
-                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-            fn_sid = next((s for s in sym_ids
-                           if s.endswith(f"::{fn.name}") and s.startswith(rel)), None)
+        for fn, fn_qual in _functions_with_quals(tree):
+            fn_sid = by_qual.get((rel, fn_qual))
             if not fn_sid:
                 continue
             scope.enter(fn)
@@ -280,15 +318,14 @@ def extract(idx, root, files, sym_ids):
                         callee = n.value.func
                         cname = callee.id if isinstance(callee, ast.Name) else \
                             (callee.attr if isinstance(callee, ast.Attribute) else None)
-                        produced_by = next((s for s in sym_ids if s.endswith(f"::{cname}")), None)
+                        produced_by = unique(cname) if cname else None
                         if produced_by:
                             d = node("dataset", f"{rel}::{fn.name}::{var}", var, sp, "frame")
                             add(produced_by, d, PRODUCES, "returns")
 
                 # ---- a named frame passed onward = consumption ---------------
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
-                    callee_sid = next((s for s in sym_ids
-                                       if s.endswith(f"::{n.func.id}")), None)
+                    callee_sid = unique(n.func.id)
                     if callee_sid:
                         for a in n.args:
                             if isinstance(a, ast.Name):
@@ -305,7 +342,9 @@ def extract(idx, root, files, sym_ids):
     for e in idx.edges:
         if e.kind in (READS_COL, WRITES_COL):
             fn_cols.setdefault(e.from_symbol, set()).add(e.to_symbol)
+    # sorted: set iteration order varies with hash randomization across runs,
+    # and edge order must not
     for dataset, fns in producers.items():
-        for fn_sid in fns:
-            for col in fn_cols.get(fn_sid, ()):
+        for fn_sid in sorted(fns):
+            for col in sorted(fn_cols.get(fn_sid, ())):
                 add(dataset, col, HAS_COL)

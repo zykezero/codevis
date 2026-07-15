@@ -34,10 +34,17 @@ def is_repo(root: Path) -> bool:
 
 
 def changed_lines(root: Path, ref: str = "HEAD"):
-    """{relpath: {line numbers touched}}. Includes untracked files in full."""
+    """{relpath: {line numbers touched}}. Includes untracked files in full.
+
+    `--relative` makes the diff paths relative to `root` (the indexed folder),
+    not the repository root. Symbol spans are workspace-relative, so without it
+    a workspace that is a SUBDIRECTORY of its repo (monorepos) matched nothing
+    and the blast radius silently reported "nothing changed".
+    """
     out = {}
     r = subprocess.run(
-        ["git", "-C", str(root), "diff", "--unified=0", "--no-color", ref],
+        ["git", "-C", str(root), "diff", "--unified=0", "--no-color",
+         "--relative", ref],
         capture_output=True, text=True)
     if r.returncode != 0:
         raise SystemExit(f"git diff failed: {r.stderr.strip()}")

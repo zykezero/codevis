@@ -73,8 +73,12 @@ def extract(idx, root, sources, trees, txt, walk, span, globals_, known_external
             idx.symbols.append(Symbol(sid, name, key, kind, sp, sp, detail))
         return sid
 
+    edge_keys = {(e.from_symbol, e.to_symbol, e.kind) for e in idx.edges}
+
     def add(a, b, kind, detail=""):
-        if not any(x.from_symbol == a and x.to_symbol == b and x.kind == kind for x in idx.edges):
+        k = (a, b, kind)
+        if k not in edge_keys:
+            edge_keys.add(k)
             idx.edges.append(Edge(a, b, kind, detail))
 
     # top-level string constants: PROCESSED <- "processed_iris.csv"
@@ -195,7 +199,9 @@ def extract(idx, root, sources, trees, txt, walk, span, globals_, known_external
             producers.setdefault(e.to_symbol, set()).add(e.from_symbol)
         if e.kind in (READS_COL, WRITES_COL):
             fn_cols.setdefault(e.from_symbol, set()).add(e.to_symbol)
+    # sorted: set iteration order varies with hash randomization across runs,
+    # and edge order must not
     for dataset, fns in producers.items():
-        for fn_sid in fns:
-            for col in fn_cols.get(fn_sid, ()):
+        for fn_sid in sorted(fns):
+            for col in sorted(fn_cols.get(fn_sid, ())):
                 add(dataset, col, HAS_COL)

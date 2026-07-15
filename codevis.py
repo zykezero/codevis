@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "spike"))
 
 import gitimpact        # noqa: E402
-from schema import Index  # noqa: E402
+from schema import Index, source_files  # noqa: E402
 
 # Front-ends are loaded LAZILY, and only for languages actually present.
 #
@@ -31,9 +31,9 @@ from schema import Index  # noqa: E402
 # pure-Python project that contains no R at all. That is the same class of mistake
 # as the false links: making a hard requirement out of weak evidence.
 FRONTENDS = {
-    "python": ("frontend_python", "*.py", "jedi"),
-    "r":      ("frontend_r", "*.R", "tree_sitter_languages"),
-    "sql":    ("frontend_sql", "*.sql", "sqlglot"),
+    "python": ("frontend_python", ".py", "jedi"),
+    "r":      ("frontend_r", ".r", "tree_sitter_languages"),
+    "sql":    ("frontend_sql", ".sql", "sqlglot"),
 }
 
 PIP_HINT = {
@@ -53,7 +53,7 @@ class MissingDependency(Exception):
 
 def load_frontend(lang):
     import importlib
-    mod_name, _glob, dep = FRONTENDS[lang]
+    mod_name, _ext, dep = FRONTENDS[lang]
     try:
         return importlib.import_module(mod_name).build_index
     except ImportError as e:
@@ -61,10 +61,14 @@ def load_frontend(lang):
 
 
 def present(root: Path):
-    """Every language with source under this root — a project can be mixed."""
+    """Every language with source under this root — a project can be mixed.
+
+    Uses the same discovery as the front-ends (schema.source_files), so a
+    language that only appears inside `.venv`/`node_modules` is not "present".
+    """
     out = []
-    for lang, (_mod, glob, _dep) in FRONTENDS.items():
-        if any("__pycache__" not in str(p) for p in root.rglob(glob)):
+    for lang, (_mod, ext, _dep) in FRONTENDS.items():
+        if source_files(root, ext):
             out.append(lang)
     if not out:
         raise SystemExit(f"no indexable source found under {root}")
