@@ -38,6 +38,12 @@ export type ModelPick = { vendor: string; family: string; id: string; name: stri
 
 const SETTING = 'codevis.model';
 
+/** Below this, a model is too small to reliably hold this extension's own
+ * context bundles — the eval's raw arm alone is ~14.5k tokens, and a Describe
+ * on a large function plus its call site is not tiny either. Not a hard block
+ * (the user may know better); it drives a warning and the unset-default. */
+export const SMALL_CONTEXT = 20_000;
+
 const NL = String.fromCharCode(10);
 const BR = NL;   // a blank markdown line
 
@@ -151,13 +157,27 @@ export class VSCodeLM implements LLMClient {
    * toast was pure noise. Warn again only when the situation changes. */
   private lastWarnedFallback = '';
 
+  /** The sensible default when the setting is unset.
+   *
+   * This used to be `models[0]` — "whichever VS Code listed first". That is
+   * arbitrary, and arbitrary turned out to be actively harmful: on a stock
+   * Copilot install models[0] is a 12k-token model that cannot hold this
+   * extension's own context bundles, so the out-of-the-box path failed. The
+   * largest context window is at least a defensible, explainable choice, and
+   * models reporting 0 tokens cannot serve a prompt at all.
+   */
+  private best(models: vscode.LanguageModelChat[]): vscode.LanguageModelChat | undefined {
+    const usable = models.filter(m => m.maxInputTokens > 0);
+    return [...usable].sort((a, b) => b.maxInputTokens - a.maxInputTokens)[0] ?? models[0];
+  }
+
   /** Resolve the setting against what is actually available right now. */
   async resolve(): Promise<vscode.LanguageModelChat | undefined> {
     const models = await this.list();
     if (!models.length) return undefined;
 
     const want = parseSetting(this.getSetting());
-    if (!want) return models[0];         // unset: first available, and the status bar says which
+    if (!want) return this.best(models);   // unset: largest context; status bar says which
 
     const hit = models.find(m =>
       m.family === want.family && (!want.vendor || m.vendor === want.vendor))
@@ -170,19 +190,21 @@ export class VSCodeLM implements LLMClient {
     // The configured model is not available (key revoked, provider uninstalled,
     // a typo). Say so — answering with a DIFFERENT model than the one configured,
     // silently, is exactly the failure this whole change exists to remove.
-    const fallback = `${this.getSetting()} -> ${describe(models[0])}`;
+    const sub = this.best(models);
+    if (!sub) return undefined;
+    const fallback = `${this.getSetting()} -> ${describe(sub)}`;
     if (fallback !== this.lastWarnedFallback) {
       this.lastWarnedFallback = fallback;
       void vscode.window.showWarningMessage(
         `codevis: the configured model "${this.getSetting()}" is not available. ` +
-        `Using ${describe(models[0])} instead.`, 'Choose a model', 'Open settings')
+        `Using ${describe(sub)} instead.`, 'Choose a model', 'Open settings')
         .then(a => {
           if (a === 'Choose a model') vscode.commands.executeCommand('codevis.selectModel');
           if (a === 'Open settings') vscode.commands.executeCommand(
             'workbench.action.openSettings', SETTING);
         });
     }
-    return models[0];
+    return sub;
   }
 
   async available(): Promise<boolean> {
@@ -210,6 +232,17 @@ export class VSCodeLM implements LLMClient {
       for await (const chunk of res.text) text += chunk;
       return { text, model: describe(model) };
     } catch (e: any) {
+      // A provider may ADVERTISE a model through selectChatModels() and then
+      // refuse to serve it to third-party extensions — Copilot does this for
+      // its internal utility models. It surfaces as a raw 400 blob that reads
+      // like our bug, and the picker cannot know in advance, so name it here.
+      const msg = String(e?.message ?? e);
+      if (/model_not_supported|requested model is not supported/i.test(msg)) {
+        throw new Error(
+          `${describe(model)} is listed by VS Code but its provider will not serve it ` +
+          `to extensions. This is a provider restriction, not a codevis setting — ` +
+          `pick a different model with "codevis: Select language model".`);
+      }
       // Consent denial, quota exhaustion and filtering arrive as a typed
       // LanguageModelError; shown raw it reads like a crash. Translate the
       // codes the user can actually act on.
@@ -231,78 +264,6 @@ export class VSCodeLM implements LLMClient {
       }
       throw e;
     }
-  }
-}
-
-/** Reserved prefix in `codevis.model` that routes to the direct Anthropic
- * adapter: `anthropic-api/<model-id>`. The setting stays the single source of
- * truth — diffable, visible in the Settings UI, driving the status bar —
- * with no second hidden mode. */
-export const ANTHROPIC_PREFIX = 'anthropic-api/';
-
-import { AnthropicDirect, DEFAULT_ANTHROPIC_MODEL } from './anthropic';
-
-/** Dispatch on the existing setting: `anthropic-api/...` goes to the direct
- * adapter, everything else to vscode.lm. The Contextualizer, eval, and panel
- * only know the LLMClient interface and are unchanged. Precedence stays with
- * vscode.lm — the router never auto-switches; the user chooses by picking a
- * model, exactly as before. */
-export class RouterLLM implements LLMClient {
-  constructor(readonly vs: VSCodeLM, readonly direct: AnthropicDirect) {}
-
-  /** The direct-path model id when the setting selects it, else null. */
-  directModel(): string | null {
-    const s = this.vs.getSetting();
-    if (!s.startsWith(ANTHROPIC_PREFIX)) return null;
-    return s.slice(ANTHROPIC_PREFIX.length) || DEFAULT_ANTHROPIC_MODEL;
-  }
-
-  getSetting(): string { return this.vs.getSetting(); }
-  setSetting(v: string) { return this.vs.setSetting(v); }
-  list() { return this.vs.list(); }
-
-  async available(): Promise<boolean> {
-    return (await this.vs.available()) || (await this.direct.hasKey());
-  }
-
-  async resolveActive(): Promise<ResolvedModel | undefined> {
-    const m = this.directModel();
-    if (m !== null) {
-      // The user explicitly chose the direct path; a missing key surfaces as
-      // an actionable error at request time, not a silent fallback to
-      // whatever vscode.lm lists first.
-      return { id: ANTHROPIC_PREFIX + m, handle: m };
-    }
-    return this.vs.resolveActive();
-  }
-
-  async chat(system: string, user: string, token: vscode.CancellationToken,
-             resolved?: ResolvedModel): Promise<ChatResult> {
-    const m = this.directModel();
-    if (m !== null) return this.direct.chat(m, system, user, token);
-    return this.vs.chat(system, user, token, resolved);
-  }
-
-  async diagnose(): Promise<string> {
-    const L: string[] = [await this.vs.diagnose()];
-    L.push(BR + '## Anthropic API key (direct path)' + BR);
-    const has = await this.direct.hasKey();
-    L.push(`- key stored: ${has ? 'yes (in the OS keychain via SecretStorage)' : 'no'}`);
-    L.push(`- \`codevis.model\` routes to the direct path: ` +
-           `${this.directModel() !== null ? `yes (\`${this.getSetting()}\`)` : 'no'}`);
-    if (has) {
-      try {
-        const models = await this.direct.listModels();
-        L.push(`- live verification: ok — the Models API returned ${models.length} model(s)`);
-      } catch (e: any) {
-        L.push(`- live verification: FAILED — ${e?.message ?? e}`);
-      }
-    } else {
-      L.push('- no Copilot and no provider? Run **codevis: Set Anthropic API key**, then');
-      L.push('  pick a model with **codevis: Select language model** — it will be saved as');
-      L.push(`  \`${ANTHROPIC_PREFIX}<model-id>\` in \`codevis.model\`.`);
-    }
-    return L.join('\n');
   }
 }
 

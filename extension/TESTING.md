@@ -56,14 +56,17 @@ then run `npm install && npm run compile` and use the *"recompile + run"* config
 | 5 | **Hover a flow node** | The *real editor* scrolls to that function and flashes it | **This is the VS Code payoff — the thing a browser cannot do** |
 | 6 | **Web** tab | Whole-project graph; drag a file box; toggle filters | |
 | 7 | **✦ contextualize** on a card | Model explains it; mentioned symbols become clickable | First use triggers a VS Code consent prompt |
-| 8 | `codevis: Show change blast radius` | Needs a git repo. `demo_project` is not one yet | |
+| 8 | `codevis: Show change blast radius` | Edit a function in `demo_project`, then run it vs `HEAD` | `demo_project` is a subdirectory of the codevis repo, not a repo itself — `git diff --relative` is what makes that work |
 
 ## Known untested
 
-Everything above #4 has only been tested outside VS Code. The webview handshake,
-the `vscode.lm` consent flow, and interpreter discovery have **never actually
-run** — there was no VS Code in the environment they were built in. Expect
-breakage in exactly those three places first.
+The webview handshake and interpreter discovery were built in an environment
+with no VS Code and are still lightly exercised. `test_render.py` boot-tests the
+viewer JS on every build, but the webview *bridge* is not covered by it.
+
+The `vscode.lm` path **has** now run end to end (Copilot, A/B eval, 12 requests).
+What that first real run cost us is recorded under "Choosing the model" below —
+every item there is a bug we hit, not a hypothetical.
 
 ## Choosing the model
 
@@ -71,7 +74,7 @@ Contextualize uses whatever you set in **`codevis.model`** (Settings → search
 `codevis`). The value is `vendor/family`, e.g.:
 
 ```
-anthropic/claude-sonnet-4
+copilot/claude-haiku-4.5
 ```
 
 Two ways to set it:
@@ -92,6 +95,35 @@ with VS Code (Copilot, or your own key via **Chat: Manage Language Models**).
 If the configured model disappears (key revoked, extension removed, typo), codevis
 **warns and tells you what it used instead** rather than quietly answering with a
 different model than the one you chose.
+
+### What the model list does not tell you
+
+`selectChatModels()` returns things that look usable and are not. All three of
+these cost a failed run before the picker learned to handle them:
+
+- **Advertised ≠ served.** Copilot lists `copilot/copilot-utility` and
+  `copilot/copilot-utility-small`, then answers every extension request with
+  `400 model_not_supported`. Nothing in the model object predicts this, so the
+  picker cannot hide them — but `chat()` now names the provider restriction
+  instead of surfacing a raw 400 blob that reads like a codevis bug.
+- **Context windows vary by 10×.** `copilot/gpt-4o-mini` reports 12,078 input
+  tokens — too small for the eval's raw arm (~14.5k) and marginal for Describe
+  on a large function. The picker sorts biggest-first, flags anything under
+  20k, and the eval refuses to run rather than report a win by truncation.
+- **Names are not identifying.** Two entries are labelled **"Auto"**:
+  `copilot/claude-haiku-4.5` (fine) and `copilotcli/` (0 input tokens, unusable).
+  The picker now leads with the setting string, not the display name, and hides
+  0-token models.
+
+**With the setting unset**, codevis picks the **largest-context** model, not
+`models[0]`. "First in the list" is arbitrary, and on a stock Copilot install
+the arbitrary choice was a 12k model that could not hold codevis's own prompts —
+the default path was the broken path.
+
+**Anthropic sidebar users:** the `anthropic.claude-code` extension registers no
+`vscode.lm` provider (no `languageModels` contribution, no
+`registerChatModelProvider` call), so its model is not available to this or any
+other extension. Copilot is the supported path.
 
 ## Failure modes worth recognising
 

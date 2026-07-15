@@ -51,14 +51,6 @@
       {
         "command": "codevis.diagnoseModels",
         "title": "codevis: Diagnose language model access"
-      },
-      {
-        "command": "codevis.setAnthropicKey",
-        "title": "codevis: Set Anthropic API key"
-      },
-      {
-        "command": "codevis.clearAnthropicKey",
-        "title": "codevis: Clear Anthropic API key"
       }
     ],
     "menus": {
@@ -81,7 +73,7 @@
         "codevis.model": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Language model used by **Describe**, as `vendor/family` — for example `anthropic/claude-sonnet-4` or `copilot/gpt-4o`. A bare family name (`claude-sonnet-4`) also works.\n\nLeave empty to use the first model VS Code offers.\n\nThe list is whatever you have registered with VS Code — Copilot, or your own API key added via **Chat: Manage Language Models**. codevis never sees your key.\n\nNo Copilot? Use `anthropic-api/<model-id>` (for example `anthropic-api/claude-opus-4-8`) together with **codevis: Set Anthropic API key** — the key is stored only in the OS keychain.\n\nRun **codevis: Select language model** to pick from the models actually available on this machine and write the value here.",
+          "markdownDescription": "Language model used by **Describe**, as `vendor/family` — for example `copilot/claude-haiku-4.5` or `copilot/gpt-4o`. A bare family name also works.\n\nLeave empty to use the first model VS Code offers.\n\nThe list is whatever you have registered with VS Code — Copilot, or your own key added via **Chat: Manage Language Models**. codevis never sees your key.\n\nRun **codevis: Select language model** to pick from the models actually available on this machine and write the value here — it hides models too small or unusable for this extension.",
           "scope": "window"
         },
         "codevis.describe.callerLines": {
@@ -98,18 +90,12 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc -p ./ --noEmit",
-    "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --platform=node --format=cjs",
-    "compile": "npm run typecheck && npm run bundle",
-    "watch": "npm run bundle -- --watch"
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.90.0",
-    "esbuild": "^0.28.1",
     "typescript": "^5.4.0"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.111.0"
   }
 }

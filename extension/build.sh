@@ -33,11 +33,9 @@ mkdir -p "$HERE/eval"
 cp "$ROOT/eval/facts.py" "$ROOT/eval/build_arms.py" "$ROOT/eval/README.md" "$HERE/eval/"
 
 cd "$HERE"
-# Typecheck with the locally-installed compiler, then bundle with esbuild.
-# Bundling matters for packaging: plain tsc + `vsce package` would ship the
-# whole node_modules tree (the Anthropic SDK and friends) into the .vsix;
-# esbuild folds the runtime dependencies into one out/extension.js.
-node node_modules/typescript/bin/tsc -p ./ --noEmit
-node node_modules/esbuild/bin/esbuild src/extension.ts --bundle \
-  --outfile=out/extension.js --external:vscode --platform=node --format=cjs
-echo "built: out/extension.js (bundled) + media/ + indexer/ + eval/"
+# Prefer the locally-installed compiler; `npx tsc` can resolve to a network
+# fetch when the local bin isn't on PATH (and fails offline / on Windows).
+# No bundler: the extension has zero runtime dependencies, so tsc output IS
+# the shippable artifact and `out/` can be committed pre-compiled.
+node node_modules/typescript/bin/tsc -p ./
+echo "built: out/extension.js + media/ + indexer/ + eval/"
