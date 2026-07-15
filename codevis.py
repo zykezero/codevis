@@ -125,13 +125,34 @@ def build(root: Path, lang: str | None = None):
 
 
 def render(index, out: Path):
+    """Assemble the standalone page. Two rules keep INDEXED SOURCE from becoming
+    executable markup in it:
+
+    1. Escape `<` in the JSON payload as \\u003c (identical bytes after JS string
+       parsing). The HTML parser ends a <script> element at the literal text
+       "</script>" REGARDLESS of JS string context, so any indexed file that
+       contains that text would otherwise break out of the block and run.
+    2. Substitute all template tokens in ONE regex pass. Chained str.replace
+       rescans earlier substitutions — and the payload legitimately contains
+       "__APP__" whenever the indexed project does (this repo does, right here) —
+       so a chained replace would splice app.js into the middle of the data.
+
+    The template's CSP (nonce'd script blocks only) is the backstop for both.
+    """
+    import html as html_mod
+    import re as re_mod
+    import secrets
+
     tpl = (HERE / "viewer" / "template.html").read_text(encoding="utf8")
     app = (HERE / "viewer" / "app.js").read_text(encoding="utf8")
-    payload = json.dumps(index.to_dict())
-    html = (tpl
-            .replace("__ROOT__", index.root)
-            .replace("__INDEX__", payload)
-            .replace("__APP__", app))
+    nonce = secrets.token_urlsafe(16)
+    parts = {
+        "__NONCE__": nonce,
+        "__ROOT__": html_mod.escape(index.root),
+        "__INDEX__": json.dumps(index.to_dict()).replace("<", "\\u003c"),
+        "__APP__": app,
+    }
+    html = re_mod.sub(r"__(?:NONCE|ROOT|INDEX|APP)__", lambda m: parts[m.group(0)], tpl)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf8")
     return out

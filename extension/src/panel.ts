@@ -5,6 +5,7 @@
  * flash-highlight it" is showTextDocument + revealRange + a decoration. The user
  * already has the code open; we were about to ship a worse copy of it.
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -74,23 +75,32 @@ export class CodevisPanel {
     const app = fs.readFileSync(path.join(media, 'app.js'), 'utf8');
     const host = fs.readFileSync(path.join(media, 'host.js'), 'utf8');
 
-    // NOTE the arrow functions. This is not style — it is the fix for a real bug.
+    // This webview holds the full text of every indexed file AND can post
+    // applyEdit messages that write to the workspace — so indexed source must
+    // never become markup. Three defenses, each of which has caught a real bug:
     //
-    // String.replace(pattern, replacementSTRING) interprets `$&`, `$'`, "$`" and
-    // `$1` inside the REPLACEMENT. Indexed source code contains those sequences
-    // routinely: a regex like re.compile(r'...$') yields `$'` once JSON-encoded,
-    // which JS expands to "everything after the match" — splicing the template
-    // into its own data, corrupting the JSON, and duplicating the __APP__ token so
-    // the next replace substituted the wrong occurrence. Result: a panel that
-    // renders but populates nothing.
+    // 1. Escape `<` in the JSON as < (same bytes after JS string parsing).
+    //    The HTML parser ends a <script> element at the literal "</script>"
+    //    regardless of string context; an indexed file containing that text
+    //    would otherwise break out and execute with acquireVsCodeApi in hand.
     //
-    // A replacer FUNCTION receives the match and returns a literal — no `$`
-    // expansion. (The Python CLI never had this bug: str.replace does not do it,
-    // which is exactly why the standalone export worked while the extension did not.)
-    return tpl
-      .replace('__ROOT__', () => this.gi.g.root)
-      .replace('__INDEX__', () => JSON.stringify(this.gi.g))
-      .replace('__APP__', () => app + '\n' + host);
+    // 2. ONE regex pass with a replacer function, not chained .replace calls.
+    //    A replacer function avoids `$&`/`$'` expansion (a regex like r'...$'
+    //    in indexed source once spliced the template into its own data), and
+    //    the single pass means substituted content is never rescanned — the
+    //    payload legitimately contains "__APP__" whenever the indexed project
+    //    does, and a chained replace would hit that occurrence first.
+    //
+    // 3. A CSP that only executes the two nonce-carrying script blocks, as the
+    //    backstop for any escaping bug the first two rules miss.
+    const nonce = crypto.randomBytes(16).toString('base64url');
+    const parts: Record<string, string> = {
+      __NONCE__: nonce,
+      __ROOT__: this.gi.g.root.replace(/&/g, '&amp;').replace(/</g, '&lt;'),
+      __INDEX__: JSON.stringify(this.gi.g).replace(/</g, '\\u003c'),
+      __APP__: app + '\n' + host,
+    };
+    return tpl.replace(/__(?:NONCE|ROOT|INDEX|APP)__/g, m => parts[m]);
   }
 
   private lastHovered?: vscode.TextEditor;

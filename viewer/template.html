@@ -2,6 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Indexed SOURCE CODE is spliced into this page as JSON. The CSP is the
+     backstop if any escaping bug lets that data become markup: only the two
+     nonce-carrying script blocks below may execute, ever. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-__NONCE__';">
 <title>codevis — __ROOT__</title>
 <style>
   :root {
@@ -440,9 +445,10 @@
 <header>
   <div class="brand">code<span>vis</span></div>
   <div class="vtabs">
-    <div class="vtab on" data-view="cards" onclick="setView('cards')">Cards</div>
-    <div class="vtab" data-view="flow" onclick="setView('flow')">Flow</div>
-    <div class="vtab" data-view="web" onclick="setView('web')">Web</div>
+    <!-- wired by app.js — inline onclick would violate the CSP -->
+    <div class="vtab on" data-view="cards">Cards</div>
+    <div class="vtab" data-view="flow">Flow</div>
+    <div class="vtab" data-view="web">Web</div>
   </div>
   <div class="meta" id="meta"></div>
   <div class="legend">
@@ -483,7 +489,7 @@
 </main>
 <div class="tip" id="tip"></div>
 
-<script>
+<script nonce="__NONCE__">
 const INDEX = __INDEX__;
 
 // ---------- index in memory -------------------------------------------------
@@ -636,6 +642,6 @@ function renderSpan(file, startLine, endLine, highlightSym) {
   return `<pre class="code">${html}</pre>`;
 }
 </script>
-<script>__APP__</script>
+<script nonce="__NONCE__">__APP__</script>
 </body>
 </html>

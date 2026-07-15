@@ -177,7 +177,10 @@ def build_index(root: Path) -> Index:
             if n.is_definition():
                 continue
             ref = Reference(
-                span=_span(f.relative_to(root), n),
+                # rel_s, not f.relative_to(root): str(WindowsPath) yields
+                # backslashes, and every other file key in the index is POSIX.
+                # On Windows the mismatch orphaned every reference span.
+                span=_span(rel_s, n),
                 text=n.name,
                 enclosing=enclosing_of(n.line),
             )

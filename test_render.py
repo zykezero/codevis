@@ -33,11 +33,15 @@ import codevis  # noqa: E402
 FIXTURES = [HERE / "fixtures" / "python_demo",
             HERE / "fixtures" / "r_demo",
             HERE / "fixtures" / "warehouse_demo",
+            HERE / "fixtures" / "hostile",   # source that attacks the HTML assembly
             HERE / "demo_project"]        # REAL code — the fixtures are too kind
 
 EXT_HARNESS = r"""
 // Assemble the page the way the VS Code extension does (panel.ts), and prove the
-// result is intact. Guards against `$`-expansion in replacement strings.
+// result is intact. Guards against: `$`-expansion in replacement strings,
+// "</script>" breakout from indexed source, and template tokens inside the
+// payload being substituted (chained-replace rescanning).
+// KEEP THE ASSEMBLY IN SYNC WITH panel.ts html().
 const fs = require('fs'), vm = require('vm');
 const [tplP, appP, hostP, idxP] = process.argv.slice(2);
 const tpl = fs.readFileSync(tplP, 'utf8');
@@ -45,16 +49,35 @@ const app = fs.readFileSync(appP, 'utf8');
 const host = fs.existsSync(hostP) ? fs.readFileSync(hostP, 'utf8') : '';
 const g = JSON.parse(fs.readFileSync(idxP, 'utf8'));
 
-const html = tpl
-  .replace('__ROOT__', () => g.root)
-  .replace('__INDEX__', () => JSON.stringify(g))
-  .replace('__APP__', () => app + '\n' + host);
+const parts = {
+  __NONCE__: 'testnonce',
+  __ROOT__: g.root.replace(/&/g, '&amp;').replace(/</g, '&lt;'),
+  __INDEX__: JSON.stringify(g).replace(/</g, '\\u003c'),
+  __APP__: app + '\n' + host,
+};
+const html = tpl.replace(/__(?:NONCE|ROOT|INDEX|APP)__/g, m => parts[m]);
 
-const left = ['__ROOT__', '__INDEX__', '__APP__'].filter(p => html.includes(p));
-const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+// 1. every script block must still parse — a "</script>" breakout or a spliced
+//    replacement corrupts at least one of them
+const blocks = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]);
 let bad = 0;
 for (const b of blocks) { try { new vm.Script(b); } catch (e) { bad++; } }
-console.log(JSON.stringify({ left: left.length, syntax: bad, blocks: blocks.length }));
+
+// 2. the app block must be present VERBATIM at its slot — proves __APP__ in the
+//    template was substituted, not an occurrence inside the JSON payload
+const appOk = html.includes(parts.__APP__) ? 0 : 1;
+
+// 3. the embedded INDEX must round-trip byte-identically — proves no splicing,
+//    no $-expansion, and that < escaping did not alter the data
+let roundtrip = 1;
+try {
+  const ctx = { console };
+  vm.createContext(ctx);
+  vm.runInContext(blocks[0] + '\n; globalThis.INDEX = INDEX;', ctx);
+  roundtrip = JSON.stringify(ctx.INDEX) === JSON.stringify(g) ? 0 : 1;
+} catch (e) { roundtrip = 1; }
+
+console.log(JSON.stringify({ syntax: bad, appOk, roundtrip, blocks: blocks.length }));
 """
 
 BOOT_HARNESS = r"""
@@ -136,7 +159,15 @@ console.log(JSON.stringify({bad, leaks, symbols: ctx.INDEX.symbols.length}));
 def main():
     failures = 0
     for fx in FIXTURES:
-        idx = codevis.build(fx)
+        try:
+            idx = codevis.build(fx)
+        except SystemExit as e:
+            # A language front-end's optional dependency is missing on this
+            # machine (codevis itself already skips-and-warns per language; a
+            # single-language fixture then has nothing left). Same rule here:
+            # skip loudly rather than fail the whole suite.
+            print(f"[SKIP] {fx.name:<14} {e}")
+            continue
         lang = idx.language
 
         # --- 2. span alignment -------------------------------------------------
@@ -170,22 +201,26 @@ def main():
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "v.html"
             codevis.render(idx, out)
-            scripts = re.findall(r"<script>(.*?)</script>", out.read_text(encoding="utf8"), re.S)
+            scripts = re.findall(r"<script[^>]*>(.*?)</script>",
+                                 out.read_text(encoding="utf8"), re.S)
 
             # -1. the EXTENSION's assembly (panel.ts), not just the Python one
             idxf = Path(td) / "idx.json"
             idxf.write_text(json.dumps(idx.to_dict()), encoding="utf8")
             eh = Path(td) / "ext.js"
             eh.write_text(EXT_HARNESS, encoding="utf8")
-            media = HERE / "extension" / "media"
+            # template/app from viewer/ (the source of truth — extension/media is
+            # a gitignored build copy); host.js is real source and lives in media.
+            viewer = HERE / "viewer"
+            host_js = HERE / "extension" / "media" / "host.js"
             er = subprocess.run(
-                ["node", str(eh), str(media / "template.html"), str(media / "app.js"),
-                 str(media / "host.js"), str(idxf)],
+                ["node", str(eh), str(viewer / "template.html"), str(viewer / "app.js"),
+                 str(host_js), str(idxf)],
                 capture_output=True, text=True)
             try:
                 ext = json.loads(er.stdout.strip().split("\n")[-1])
             except Exception:
-                ext = {"left": 99, "syntax": 99}
+                ext = {"syntax": 99, "appOk": 99, "roundtrip": 99}
 
             # 0. does the page even boot?
             whole = Path(td) / "whole.js"
@@ -225,15 +260,15 @@ def main():
             if kind_of.get(e.from_symbol) not in exp[0] or kind_of.get(e.to_symbol) not in exp[1]:
                 badedge += 1
 
+        ext_ok = ext["syntax"] == 0 and ext.get("appOk") == 0 and ext.get("roundtrip") == 0
         ok = (misaligned == 0 and dangling == 0 and badedge == 0
               and render["bad"] == 0 and render["leaks"] == 0
-              and boot["boot"] == "ok"
-              and ext["left"] == 0 and ext["syntax"] == 0)
+              and boot["boot"] == "ok" and ext_ok)
         failures += 0 if ok else 1
         mark = "PASS" if ok else "FAIL"
         print(f"[{mark}] {fx.name:<14} {lang:<7} "
               f"{render['symbols']:>3} symbols | boot: {boot['boot']:<6} | "
-              f"ext-html: {'ok' if ext['left']==0 and ext['syntax']==0 else 'BROKEN'} | "
+              f"ext-html: {'ok' if ext_ok else 'BROKEN'} | "
               f"spans: {misaligned} | dangling: {dangling} | "
               f"edges: {badedge} | text: {render['bad']} | leaks: {render['leaks']}")
         if boot["boot"] != "ok":

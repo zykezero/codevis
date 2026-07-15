@@ -956,7 +956,7 @@ function applyHighlight() {
       `<b>${nm}</b> · ${all.size - 1} connected within ${DEPTH === 99 ? 'all' : DEPTH} hop${DEPTH === 1 ? '' : 's'}` +
       ` · <span class="up-t">${up.size} depend on it</span>` +
       ` · <span class="down-t">${down.size} it depends on</span>` +
-      ` <span class="clr" onclick="SEL=null;applyHighlight()">clear</span>`;
+      ` <span class="clr">clear</span>`;   // handled by the delegated click listener (CSP)
   }
 }
 
@@ -1004,7 +1004,7 @@ function enterWeb() {
     notice(`The code changed since you arranged this view
             (${res.added.length} added, ${res.removed.length} removed).
             <b>Your positions were kept</b>; new nodes were placed automatically.
-            <span class="nact" onclick="resetLayout()">re-arrange from scratch</span>`, 'warn');
+            <span class="nact">re-arrange from scratch</span>`, 'warn');
   }
 }
 
@@ -2086,5 +2086,17 @@ function setFlowFile(f) {
 // Must be the LAST thing in the file. setView() reaches the tether layer and the
 // flow view, whose `const`/`let` are in the temporal dead zone until declared.
 // (This exact ordering bug shipped twice; test_render.py now boots every build.)
+
+// CSP forbids inline onclick attributes, so the view tabs and the two
+// dynamically-inserted actions (.clr, .nact) are wired here instead.
+document.querySelectorAll('.vtab').forEach(el =>
+  el.addEventListener('click', () => setView(el.dataset.view)));
+document.addEventListener('click', ev => {
+  const t = ev.target;
+  if (!t || !t.classList) return;
+  if (t.classList.contains('clr')) { SEL = null; applyHighlight(); }
+  if (t.classList.contains('nact')) resetLayout();
+});
+
 buildOutline();
 setView('cards');
