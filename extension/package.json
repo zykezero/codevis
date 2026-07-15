@@ -4,6 +4,10 @@
   "description": "Read agent-generated code as a document: hyperlinked cards, a per-script flowchart, a whole-project data+call web, and change blast radius.",
   "version": "0.1.0",
   "publisher": "codevis",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zykezero/codevis.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
