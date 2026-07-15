@@ -14,9 +14,19 @@ function host(msg) { if (VS) VS.postMessage(msg); }
 if (IN_VSCODE) {
   document.body.classList.add('in-vscode');
 
-  // Hover a node -> reveal its code in the editor (spec A.3).
-  window.addEventListener('codevis:nodeHover', e => host({ type: 'hover', id: e.detail.id }));
-  window.addEventListener('codevis:nodeHoverEnd', () => host({ type: 'hoverEnd' }));
+  // Hover a node -> reveal its code in the editor (spec A.3). Trailing
+  // debounce: each reveal opens and shows a document in the host, and a sweep
+  // across a dense chart would otherwise queue dozens that replay serially.
+  // Only the settled hover target is revealed.
+  let hoverTimer = null;
+  window.addEventListener('codevis:nodeHover', e => {
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => host({ type: 'hover', id: e.detail.id }), 80);
+  });
+  window.addEventListener('codevis:nodeHoverEnd', () => {
+    clearTimeout(hoverTimer);
+    host({ type: 'hoverEnd' });
+  });
   window.addEventListener('codevis:reveal', e => host({ type: 'reveal', id: e.detail.id }));
   window.addEventListener('codevis:revealSpan', e =>
     host({ type: 'revealSpan', span: e.detail.span }));

@@ -1730,6 +1730,8 @@ function md(s) {
   return esc(s)
     .replace(/^### (.*)$/gm, '<h4>$1</h4>')
     .replace(/^## (.*)$/gm, '<h4>$1</h4>')
+    // fence content is safe to inline verbatim: the WHOLE string went through
+    // esc() above, so `c` arrives with <, > and & already entity-encoded
     .replace(/```([\s\S]*?)```/g, (_m, c) => `<pre class="ctxpre">${c.trim()}</pre>`)
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
@@ -1751,7 +1753,7 @@ function renderCtx(id, data, cached) {
 
   if (links.length) {
     html += '<div class="ctxlinks"><span class="ctxlbl">follow</span>' +
-      links.map(l => `<span class="chip" data-follow="${l.id}">${esc(l.name)}</span>`).join('') +
+      links.map(l => `<span class="chip" data-follow="${esc(l.id)}">${esc(l.name)}</span>`).join('') +
       '</div>';
   }
   if (plain.length) {

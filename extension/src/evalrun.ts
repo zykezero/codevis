@@ -70,11 +70,14 @@ export async function runEval(
     { location: vscode.ProgressLocation.Notification,
       title: 'codevis: running A/B eval', cancellable: true },
     async (prog, token) => {
-      for (const arm of armNames) {
-        results[arm] = {};
-        for (const q of A.questions) {
+      for (const arm of armNames) results[arm] = {};
+      // Question-major, arms interleaved: if provider quota degrades mid-run,
+      // arm-major order would feed every error to one arm and bias the
+      // comparison. Interleaving spreads degradation across both evenly.
+      for (const q of A.questions) {
+        for (const arm of armNames) {
           if (token.isCancellationRequested) throw new Error('cancelled');
-          prog.report({ message: `${arm} · ${q.id}`, increment: 100 / total });
+          prog.report({ message: `${q.id} · ${arm}`, increment: 100 / total });
 
           const user = `${A.arms[arm].context}\n\n---\n\nQUESTION\n${q.question}`;
           let got: string[] = [];

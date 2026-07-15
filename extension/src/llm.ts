@@ -16,9 +16,19 @@ import * as vscode from 'vscode';
 
 export type ChatResult = { text: string; model: string };
 
+/** An already-resolved model choice. `id` is the stable spelling used in cache
+ * keys ("vendor/family"); `handle` is whatever the client needs to run it. */
+export type ResolvedModel = { id: string; handle?: unknown };
+
 export interface LLMClient {
   available(): Promise<boolean>;
-  chat(system: string, user: string, token: vscode.CancellationToken): Promise<ChatResult>;
+  /** Resolve the active model ONCE per operation and thread the result into
+   * chat(). Resolving separately for the cache key and the request risks the
+   * two disagreeing when the model list changes between them — the answer
+   * would be cached under a different model than produced it. */
+  resolveActive(): Promise<ResolvedModel | undefined>;
+  chat(system: string, user: string, token: vscode.CancellationToken,
+       resolved?: ResolvedModel): Promise<ChatResult>;
 }
 
 /** A choice, as written in settings: "vendor/family", or a bare "family". */
@@ -133,6 +143,12 @@ export class VSCodeLM implements LLMClient {
     await this.cfg().update(SETTING, v, vscode.ConfigurationTarget.Global);
   }
 
+  /** The last fallback we warned about, as "<setting> -> <substitute>".
+   * A misconfigured model must warn ONCE, not once per resolution — a single
+   * Describe resolves more than once (cache key, then request), and the doubled
+   * toast was pure noise. Warn again only when the situation changes. */
+  private lastWarnedFallback = '';
+
   /** Resolve the setting against what is actually available right now. */
   async resolve(): Promise<vscode.LanguageModelChat | undefined> {
     const models = await this.list();
@@ -144,19 +160,26 @@ export class VSCodeLM implements LLMClient {
     const hit = models.find(m =>
       m.family === want.family && (!want.vendor || m.vendor === want.vendor))
       ?? models.find(m => m.id === want.family);
-    if (hit) return hit;
+    if (hit) {
+      this.lastWarnedFallback = '';      // configured model is back — re-arm the warning
+      return hit;
+    }
 
     // The configured model is not available (key revoked, provider uninstalled,
     // a typo). Say so — answering with a DIFFERENT model than the one configured,
     // silently, is exactly the failure this whole change exists to remove.
-    void vscode.window.showWarningMessage(
-      `codevis: the configured model "${this.getSetting()}" is not available. ` +
-      `Using ${describe(models[0])} instead.`, 'Choose a model', 'Open settings')
-      .then(a => {
-        if (a === 'Choose a model') vscode.commands.executeCommand('codevis.selectModel');
-        if (a === 'Open settings') vscode.commands.executeCommand(
-          'workbench.action.openSettings', SETTING);
-      });
+    const fallback = `${this.getSetting()} -> ${describe(models[0])}`;
+    if (fallback !== this.lastWarnedFallback) {
+      this.lastWarnedFallback = fallback;
+      void vscode.window.showWarningMessage(
+        `codevis: the configured model "${this.getSetting()}" is not available. ` +
+        `Using ${describe(models[0])} instead.`, 'Choose a model', 'Open settings')
+        .then(a => {
+          if (a === 'Choose a model') vscode.commands.executeCommand('codevis.selectModel');
+          if (a === 'Open settings') vscode.commands.executeCommand(
+            'workbench.action.openSettings', SETTING);
+        });
+    }
     return models[0];
   }
 
@@ -164,18 +187,48 @@ export class VSCodeLM implements LLMClient {
     return (await this.list()).length > 0;
   }
 
-  async chat(system: string, user: string, token: vscode.CancellationToken): Promise<ChatResult> {
-    const model = await this.resolve();
+  async resolveActive(): Promise<ResolvedModel | undefined> {
+    const m = await this.resolve();
+    return m ? { id: describe(m), handle: m } : undefined;
+  }
+
+  async chat(system: string, user: string, token: vscode.CancellationToken,
+             resolved?: ResolvedModel): Promise<ChatResult> {
+    const model = (resolved?.handle as vscode.LanguageModelChat | undefined)
+      ?? await this.resolve();
     if (!model) {
       throw new Error(
         'No language model is available to VS Code. Run "Chat: Manage Language Models" ' +
         'to add one (your own Anthropic/OpenAI key, or a provider extension), then try again.');
     }
-    const messages = [vscode.LanguageModelChatMessage.User(system + '\n\n' + user)];
-    const res = await model.sendRequest(messages, {}, token);
-    let text = '';
-    for await (const chunk of res.text) text += chunk;
-    return { text, model: describe(model) };
+    try {
+      const messages = [vscode.LanguageModelChatMessage.User(system + '\n\n' + user)];
+      const res = await model.sendRequest(messages, {}, token);
+      let text = '';
+      for await (const chunk of res.text) text += chunk;
+      return { text, model: describe(model) };
+    } catch (e: any) {
+      // Consent denial, quota exhaustion and filtering arrive as a typed
+      // LanguageModelError; shown raw it reads like a crash. Translate the
+      // codes the user can actually act on.
+      if (e instanceof vscode.LanguageModelError) {
+        const friendly: Record<string, string> = {
+          NoPermissions:
+            `you have not granted this extension access to ${describe(model)} ` +
+            `(or declined the consent prompt). Run Describe again and accept the ` +
+            `prompt, or review access under "Chat: Manage Language Models".`,
+          Blocked:
+            `the provider refused the request — usually quota exhaustion or ` +
+            `content filtering. Wait a bit, or pick a different model with ` +
+            `"codevis: Select language model".`,
+          NotFound:
+            `the model ${describe(model)} was not found — the provider may have ` +
+            `signed out or removed it. Pick another with "codevis: Select language model".`,
+        };
+        throw new Error(friendly[e.code] ?? `language model request failed (${e.code}): ${e.message}`);
+      }
+      throw e;
+    }
   }
 }
 

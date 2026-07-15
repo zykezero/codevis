@@ -35,6 +35,17 @@ function run(exe: string, args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const p = cp.execFile(exe, args, { cwd, maxBuffer: 256 * 1024 * 1024 },
       (err, stdout, stderr) => {
+        // Stock Windows aliases `python` to a Microsoft Store redirect that
+        // prints a message and exits WITHOUT running anything — sometimes
+        // with code 9009, sometimes "successfully". Detect the signature and
+        // route it into the existing no-interpreter guidance ("could not
+        // run" is what indexWorkspace keys on).
+        const noise = `${stdout ?? ''}\n${stderr ?? ''}`;
+        if (/Python was not found/i.test(noise) &&
+            /Microsoft Store|app execution aliases/i.test(noise)) {
+          return reject(new IndexerError(
+            `could not run '${exe}': it is the Windows Store alias, not an installed interpreter.`));
+        }
         if (err) reject(new IndexerError(stderr?.trim() || err.message));
         else resolve(stdout);
       });

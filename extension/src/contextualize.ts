@@ -141,30 +141,25 @@ export class Contextualizer {
 
   /** The cached answer FOR THE CURRENTLY SELECTED MODEL, if any. */
   async get(target: Symbol, caller: Symbol | null): Promise<Contextualized | undefined> {
-    const model = await this.activeModel();
-    return this.memento.get<Contextualized>('ctx:' + cacheKey(target, caller, model));
-  }
-
-  private async activeModel(): Promise<string> {
-    const anyLlm = this.llm as { resolve?: () => Promise<{ vendor: string; family: string } | undefined> };
-    if (typeof anyLlm.resolve !== 'function') return '';
-    const m = await anyLlm.resolve();
-    return m ? `${m.vendor}/${m.family}` : '';
+    const resolved = await this.llm.resolveActive();
+    return this.memento.get<Contextualized>('ctx:' + cacheKey(target, caller, resolved?.id ?? ''));
   }
 
   async run(
     gi: GraphIndex, target: Symbol, caller: Symbol | null,
     token: vscode.CancellationToken, force = false
   ): Promise<Contextualized> {
-    const active = await this.activeModel();
-    const key = 'ctx:' + cacheKey(target, caller, active);
+    // Resolve ONCE and thread the result into chat(), so the model in the
+    // cache key is the model that actually answered.
+    const resolved = await this.llm.resolveActive();
+    const key = 'ctx:' + cacheKey(target, caller, resolved?.id ?? '');
     if (!force) {
       const hit = this.memento.get<Contextualized>(key);
       if (hit) return hit;
     }
 
     const req = buildRequest(gi, target, caller);
-    const { text, model } = await this.llm.chat(SYSTEM, render(req), token);
+    const { text, model } = await this.llm.chat(SYSTEM, render(req), token, resolved);
 
     const parsed = parseJsonLoose<ContextualizeResponse>(text);
     // Malformed JSON must degrade, not error: show the prose, drop the links.
@@ -179,6 +174,23 @@ export class Contextualizer {
 
     const out: Contextualized = { ...resp, model, links };
     await this.memento.update(key, out);
+    await this.evict(key);
     return out;
+  }
+
+  /** Content-hash keys change on every edit and old entries were never
+   * reclaimed — workspaceState is serialized to a database, and append-only
+   * growth degrades it quietly. Keep the most recent CACHE_CAP entries. */
+  private static readonly CACHE_CAP = 300;
+  private static readonly KEYS = 'ctx:keys';
+
+  private async evict(newest: string) {
+    const keys = this.memento.get<string[]>(Contextualizer.KEYS, [])
+      .filter(k => k !== newest);
+    keys.push(newest);
+    while (keys.length > Contextualizer.CACHE_CAP) {
+      await this.memento.update(keys.shift()!, undefined);
+    }
+    await this.memento.update(Contextualizer.KEYS, keys);
   }
 }

@@ -10,6 +10,7 @@ import { CodevisPanel } from './panel';
 import { runEval } from './evalrun';
 
 let cached: CodeGraph | undefined;
+let cachedFolder: string | undefined;
 
 function toolRoot(ctx: vscode.ExtensionContext): string {
   // The Python indexer ships beside the extension. Keeping it as a plain CLI means
@@ -19,19 +20,32 @@ function toolRoot(ctx: vscode.ExtensionContext): string {
 }
 
 function workspaceFolder(): string | undefined {
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders?.length) return undefined;
+  // Multi-root: prefer the folder that owns the active editor rather than
+  // silently always using folder 0.
+  const doc = vscode.window.activeTextEditor?.document.uri;
+  if (doc) {
+    const own = vscode.workspace.getWorkspaceFolder(doc);
+    if (own) return own.uri.fsPath;
+  }
+  return folders[0].uri.fsPath;
 }
 
 async function getGraph(ctx: vscode.ExtensionContext, force = false, diffRef?: string) {
   const folder = workspaceFolder();
   if (!folder) throw new Error('Open a folder first — codevis indexes a workspace.');
-  if (cached && !force && !diffRef) return cached;
+  if (cached && cachedFolder === folder && !force && !diffRef) return cached;
 
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window, title: 'codevis: indexing…' },
     async () => {
       const g = await indexWorkspace(toolRoot(ctx), folder, diffRef);
-      cached = g;
+      // A diff-annotated graph is a one-shot answer to "what does this ref
+      // threaten?" — caching it would leave changed/blast-radius state on the
+      // next plain Open, and the stale-write guard would start refusing edits
+      // with a message that reads like a bug.
+      if (!diffRef) { cached = g; cachedFolder = folder; }
       return g;
     });
 }
@@ -67,6 +81,16 @@ export function activate(ctx: vscode.ExtensionContext) {
   // being changed anywhere — not just through our picker.
   ctx.subscriptions.push(vscode.workspace.onDidChangeConfiguration(ev => {
     if (ev.affectsConfiguration('codevis.model')) void refreshStatus();
+  }));
+
+  // An ordinary save makes the cached graph stale — card-driven edits already
+  // re-index, but nothing invalidated the cache for edits made in the editor.
+  // Clearing is cheap; the re-index happens lazily on the next open.
+  ctx.subscriptions.push(vscode.workspace.onDidSaveTextDocument(doc => {
+    if (/\.(py|r|sql)$/i.test(doc.fileName)) {
+      cached = undefined;
+      cachedFolder = undefined;
+    }
   }));
 
   const guard = (fn: () => Promise<void>) => async () => {
@@ -173,13 +197,27 @@ export function activate(ctx: vscode.ExtensionContext) {
     })),
 
     vscode.commands.registerCommand('codevis.diff', guard(async () => {
+      const folder = workspaceFolder();
+      if (!folder) throw new Error('Open a folder first — codevis indexes a workspace.');
       const ref = await vscode.window.showInputBox({
         prompt: 'Show the blast radius of changes against which git ref?',
         value: 'HEAD'
       });
       if (!ref) return;
+      // Validate before indexing: a typo'd ref otherwise surfaces minutes
+      // later as a raw Python error instead of "not a git ref".
+      const cp = await import('child_process');
+      const valid = await new Promise<boolean>(res =>
+        cp.execFile('git', ['-C', folder, 'rev-parse', '--verify', '--quiet',
+                            `${ref}^{commit}`],
+          err => res(!err)));
+      if (!valid) {
+        vscode.window.showErrorMessage(
+          `codevis: "${ref}" is not a git ref in this repository.`);
+        return;
+      }
       const g = await getGraph(ctx, true, ref);
-      CodevisPanel.show(ctx, g, ctxr, workspaceFolder()!);
+      CodevisPanel.show(ctx, g, ctxr, folder);
     })),
 
     vscode.commands.registerCommand('codevis.runEval', guard(async () => {
@@ -234,4 +272,4 @@ export function activate(ctx: vscode.ExtensionContext) {
   );
 }
 
-export function deactivate() { cached = undefined; }
+export function deactivate() { cached = undefined; cachedFolder = undefined; }
