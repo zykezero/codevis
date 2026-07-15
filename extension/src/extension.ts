@@ -4,7 +4,8 @@ import { CodeGraph } from './graph';
 import { indexWorkspace, IndexerError, pythonPath } from './indexer';
 // `describe` here is the MODEL formatter, not the feature — aliased to keep the
 // feature's new name unambiguous in this file.
-import { VSCodeLM, describe as describeModel, toSetting } from './llm';
+import { ANTHROPIC_PREFIX, RouterLLM, VSCodeLM, describe as describeModel, toSetting } from './llm';
+import { AnthropicDirect } from './anthropic';
 import { Contextualizer } from './contextualize';
 import { CodevisPanel } from './panel';
 import { runEval } from './evalrun';
@@ -53,7 +54,8 @@ async function getGraph(ctx: vscode.ExtensionContext, force = false, diffRef?: s
 export function activate(ctx: vscode.ExtensionContext) {
   // After a card writes to a file, the index is stale by definition. Re-index so
   // the views never describe code that is no longer there.
-  const llm = new VSCodeLM();
+  const direct = new AnthropicDirect(ctx.secrets);
+  const llm = new RouterLLM(new VSCodeLM(), direct);
   const ctxr = new Contextualizer(llm, ctx.workspaceState);
 
   // A status bar entry, because an invisible model choice is the bug we just
@@ -65,13 +67,27 @@ export function activate(ctx: vscode.ExtensionContext) {
   ctx.subscriptions.push(status);
 
   const refreshStatus = async () => {
+    const directModel = llm.directModel();
+    if (directModel !== null) {
+      const hasKey = await direct.hasKey();
+      status.text = `$(sparkle) ${ANTHROPIC_PREFIX}${directModel}`;
+      status.backgroundColor = hasKey
+        ? undefined
+        : new vscode.ThemeColor('statusBarItem.warningBackground');
+      status.tooltip = hasKey
+        ? 'codevis: language model used by Describe (direct Anthropic API) — click to change'
+        : 'codevis: no Anthropic API key stored — run "codevis: Set Anthropic API key"';
+      status.show();
+      return;
+    }
+    status.tooltip = 'codevis: language model used by Describe — click to change';
     const models = await llm.list();
     if (!models.length) {
       status.text = '$(sparkle) codevis: no model';
       status.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
     } else {
-      const active = await llm.resolve();
-      status.text = `$(sparkle) ${active ? describeModel(active) : 'no model'}`;
+      const active = await llm.resolveActive();
+      status.text = `$(sparkle) ${active ? active.id : 'no model'}`;
       status.backgroundColor = undefined;
     }
     status.show();
@@ -92,6 +108,51 @@ export function activate(ctx: vscode.ExtensionContext) {
       cachedFolder = undefined;
     }
   }));
+
+  /** Masked input → format check → live verification → OS keychain.
+   * Verifying on save means a bad key fails at paste time with a clear
+   * message, not on the first Describe. Returns true when a key was stored. */
+  const setAnthropicKey = async (): Promise<boolean> => {
+    const entered = await vscode.window.showInputBox({
+      title: 'codevis: Anthropic API key',
+      prompt: 'Stored only in the OS keychain (VS Code SecretStorage) — never in settings, state, or logs.',
+      password: true,
+      ignoreFocusOut: true,
+      validateInput: v =>
+        /^sk-ant-[A-Za-z0-9_-]{20,}$/.test(v.trim())
+          ? undefined
+          : 'an Anthropic API key looks like sk-ant-…'
+    });
+    if (!entered) return false;
+    const key = entered.trim();
+    const problem = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification,
+        title: 'codevis: verifying key against the Anthropic Models API…' },
+      () => AnthropicDirect.verify(key));
+    if (problem) {
+      vscode.window.showErrorMessage(`codevis: key not saved — ${problem}.`);
+      return false;
+    }
+    await direct.storeKey(key);
+    vscode.window.showInformationMessage(
+      'codevis: Anthropic API key verified and stored in the OS keychain.');
+    return true;
+  };
+
+  /** The whole set-verify-configure flow: ensure a key, then pick a model from
+   * the live list and write `anthropic-api/<id>` into codevis.model. */
+  const configureAnthropicDirect = async () => {
+    if (!(await direct.hasKey()) && !(await setAnthropicKey())) return;
+    const models = await direct.listModels();
+    const pick = await vscode.window.showQuickPick(
+      models.map(m => ({ label: m.displayName, description: ANTHROPIC_PREFIX + m.id, id: m.id })),
+      { title: 'codevis: Anthropic model for Describe' });
+    if (!pick) return;
+    await llm.setSetting(ANTHROPIC_PREFIX + pick.id);
+    await refreshStatus();
+    vscode.window.showInformationMessage(
+      `codevis: Describe will use ${pick.label} via your Anthropic API key (saved to codevis.model).`);
+  };
 
   const guard = (fn: () => Promise<void>) => async () => {
     try { await fn(); }
@@ -124,27 +185,49 @@ export function activate(ctx: vscode.ExtensionContext) {
       const models = await llm.list();
       if (!models.length) {
         // Do not just say "no models" — that is what happened and it told the user
-        // nothing. Offer the diagnostic that reports what VS Code actually returns.
+        // nothing. Offer the diagnostic that reports what VS Code actually
+        // returns, and the first-party key path so this is no longer a dead-end.
         const go = await vscode.window.showWarningMessage(
           'codevis: VS Code reports no language models available to extensions. ' +
           'Having Claude in a chat sidebar is not the same thing — a model must be ' +
           'registered with VS Code as a provider for other extensions to use it.',
-          'Show diagnostics', 'Manage Language Models');
+          'Use an Anthropic API key', 'Show diagnostics', 'Manage Language Models');
+        if (go === 'Use an Anthropic API key') await configureAnthropicDirect();
         if (go === 'Show diagnostics') await vscode.commands.executeCommand('codevis.diagnoseModels');
         if (go === 'Manage Language Models') await vscode.commands.executeCommand('workbench.action.chat.manageLanguageModels');
         return;
       }
 
       const current = llm.getSetting();
-      const items: (vscode.QuickPickItem & { m?: vscode.LanguageModelChat })[] =
+      const items: (vscode.QuickPickItem & { m?: vscode.LanguageModelChat; directId?: string })[] =
         models.map(m => ({
           label: (toSetting(m) === current ? '$(check) ' : '') + m.name,
           description: toSetting(m),
           detail: `${m.maxInputTokens.toLocaleString()} input tokens`,
           m
         }));
+
+      // Direct-path models, when a key is stored. vscode.lm keeps precedence —
+      // these are listed under a separator, and only picking one switches.
+      if (await direct.hasKey()) {
+        try {
+          const dm = await direct.listModels();
+          if (dm.length) {
+            items.push({ label: 'your Anthropic API key',
+                         kind: vscode.QuickPickItemKind.Separator });
+            items.push(...dm.map(m => ({
+              label: (ANTHROPIC_PREFIX + m.id === current ? '$(check) ' : '') + m.displayName,
+              description: ANTHROPIC_PREFIX + m.id,
+              directId: m.id
+            })));
+          }
+        } catch { /* key present but list failed — diagnostics report why */ }
+      }
+
       items.push(
         { label: '', kind: vscode.QuickPickItemKind.Separator },
+        { label: '$(key) Use an Anthropic API key',
+          description: 'no Copilot needed — key stays in the OS keychain' },
         { label: '$(settings-gear) Open codevis settings',
           description: 'edit codevis.model by hand' },
         { label: '$(add) Manage Language Models…',
@@ -157,12 +240,23 @@ export function activate(ctx: vscode.ExtensionContext) {
           : 'not set — using whichever model VS Code lists first'
       });
       if (!pick) return;
+      if (pick.label.includes('Use an Anthropic API key')) {
+        await configureAnthropicDirect();
+        return;
+      }
       if (pick.label.includes('Open codevis settings')) {
         await vscode.commands.executeCommand('workbench.action.openSettings', 'codevis.model');
         return;
       }
       if (pick.label.includes('Manage Language Models')) {
         await vscode.commands.executeCommand('workbench.action.chat.manageLanguageModels');
+        return;
+      }
+      if (pick.directId) {
+        await llm.setSetting(ANTHROPIC_PREFIX + pick.directId);
+        await refreshStatus();
+        vscode.window.showInformationMessage(
+          `codevis: Describe will use ${pick.directId} via your Anthropic API key (saved to codevis.model).`);
         return;
       }
       if (!pick.m) return;
@@ -173,6 +267,21 @@ export function activate(ctx: vscode.ExtensionContext) {
       await refreshStatus();
       vscode.window.showInformationMessage(
         `codevis: Describe will use ${describeModel(pick.m)} (saved to codevis.model).`);
+    })),
+
+    vscode.commands.registerCommand('codevis.setAnthropicKey', guard(async () => {
+      await setAnthropicKey();
+      await refreshStatus();
+    })),
+
+    vscode.commands.registerCommand('codevis.clearAnthropicKey', guard(async () => {
+      await direct.clearKey();
+      // If the setting pointed at the direct path it is now unusable — clear
+      // it too, so the status bar doesn't advertise a model with no key.
+      if (llm.directModel() !== null) await llm.setSetting('');
+      await refreshStatus();
+      vscode.window.showInformationMessage(
+        'codevis: Anthropic API key removed from the OS keychain.');
     })),
 
     vscode.commands.registerCommand('codevis.open', guard(async () => {

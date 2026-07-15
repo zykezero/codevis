@@ -232,6 +232,78 @@ export class VSCodeLM implements LLMClient {
   }
 }
 
+/** Reserved prefix in `codevis.model` that routes to the direct Anthropic
+ * adapter: `anthropic-api/<model-id>`. The setting stays the single source of
+ * truth — diffable, visible in the Settings UI, driving the status bar —
+ * with no second hidden mode. */
+export const ANTHROPIC_PREFIX = 'anthropic-api/';
+
+import { AnthropicDirect, DEFAULT_ANTHROPIC_MODEL } from './anthropic';
+
+/** Dispatch on the existing setting: `anthropic-api/...` goes to the direct
+ * adapter, everything else to vscode.lm. The Contextualizer, eval, and panel
+ * only know the LLMClient interface and are unchanged. Precedence stays with
+ * vscode.lm — the router never auto-switches; the user chooses by picking a
+ * model, exactly as before. */
+export class RouterLLM implements LLMClient {
+  constructor(readonly vs: VSCodeLM, readonly direct: AnthropicDirect) {}
+
+  /** The direct-path model id when the setting selects it, else null. */
+  directModel(): string | null {
+    const s = this.vs.getSetting();
+    if (!s.startsWith(ANTHROPIC_PREFIX)) return null;
+    return s.slice(ANTHROPIC_PREFIX.length) || DEFAULT_ANTHROPIC_MODEL;
+  }
+
+  getSetting(): string { return this.vs.getSetting(); }
+  setSetting(v: string) { return this.vs.setSetting(v); }
+  list() { return this.vs.list(); }
+
+  async available(): Promise<boolean> {
+    return (await this.vs.available()) || (await this.direct.hasKey());
+  }
+
+  async resolveActive(): Promise<ResolvedModel | undefined> {
+    const m = this.directModel();
+    if (m !== null) {
+      // The user explicitly chose the direct path; a missing key surfaces as
+      // an actionable error at request time, not a silent fallback to
+      // whatever vscode.lm lists first.
+      return { id: ANTHROPIC_PREFIX + m, handle: m };
+    }
+    return this.vs.resolveActive();
+  }
+
+  async chat(system: string, user: string, token: vscode.CancellationToken,
+             resolved?: ResolvedModel): Promise<ChatResult> {
+    const m = this.directModel();
+    if (m !== null) return this.direct.chat(m, system, user, token);
+    return this.vs.chat(system, user, token, resolved);
+  }
+
+  async diagnose(): Promise<string> {
+    const L: string[] = [await this.vs.diagnose()];
+    L.push(BR + '## Anthropic API key (direct path)' + BR);
+    const has = await this.direct.hasKey();
+    L.push(`- key stored: ${has ? 'yes (in the OS keychain via SecretStorage)' : 'no'}`);
+    L.push(`- \`codevis.model\` routes to the direct path: ` +
+           `${this.directModel() !== null ? `yes (\`${this.getSetting()}\`)` : 'no'}`);
+    if (has) {
+      try {
+        const models = await this.direct.listModels();
+        L.push(`- live verification: ok — the Models API returned ${models.length} model(s)`);
+      } catch (e: any) {
+        L.push(`- live verification: FAILED — ${e?.message ?? e}`);
+      }
+    } else {
+      L.push('- no Copilot and no provider? Run **codevis: Set Anthropic API key**, then');
+      L.push('  pick a model with **codevis: Select language model** — it will be saved as');
+      L.push(`  \`${ANTHROPIC_PREFIX}<model-id>\` in \`codevis.model\`.`);
+    }
+    return L.join('\n');
+  }
+}
+
 /** Strip fences and parse. The model was ASKED for JSON; it may still wrap it. */
 export function parseJsonLoose<T>(raw: string): T | null {
   const tries = [

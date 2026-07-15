@@ -3,4 +3,7 @@ src/**
 node_modules/**
 tsconfig.json
 build.sh
+package-lock.json
+TESTING.md
 **/*.map
+**/__pycache__/**
