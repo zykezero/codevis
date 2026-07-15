@@ -1,0 +1,61 @@
+{
+  "name": "codevis",
+  "displayName": "codevis — code as navigable hypertext",
+  "description": "Read agent-generated code as a document: hyperlinked cards, a per-script flowchart, a whole-project data+call web, and change blast radius.",
+  "version": "0.1.0",
+  "publisher": "codevis",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Visualization", "Programming Languages"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "codevis.open", "title": "codevis: Open view", "icon": "$(type-hierarchy)" },
+      { "command": "codevis.flowForFile", "title": "codevis: Flowchart for this file" },
+      { "command": "codevis.reindex", "title": "codevis: Re-index workspace" },
+      { "command": "codevis.exportHtml", "title": "codevis: Export standalone HTML" },
+      { "command": "codevis.diff", "title": "codevis: Show change blast radius (git)" },
+      { "command": "codevis.selectModel", "title": "codevis: Select language model" },
+      { "command": "codevis.runEval", "title": "codevis: Run A/B eval (index vs raw files)" },
+      { "command": "codevis.diagnoseModels", "title": "codevis: Diagnose language model access" }
+    ],
+    "menus": {
+      "editor/title": [
+        { "command": "codevis.flowForFile", "group": "navigation",
+          "when": "resourceLangId == python || resourceLangId == r || resourceLangId == sql" }
+      ]
+    },
+    "configuration": {
+      "title": "codevis",
+      "properties": {
+        "codevis.pythonPath": {
+          "type": "string", "default": "",
+          "description": "Python interpreter for the indexer. Empty = use the interpreter selected by the Python extension, else `python3`."
+        },
+        "codevis.model": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Language model used by **Describe**, as `vendor/family` — for example `anthropic/claude-sonnet-4` or `copilot/gpt-4o`. A bare family name (`claude-sonnet-4`) also works.\n\nLeave empty to use the first model VS Code offers.\n\nThe list is whatever you have registered with VS Code — Copilot, or your own API key added via **Chat: Manage Language Models**. codevis never sees your key.\n\nRun **codevis: Select language model** to pick from the models actually available on this machine and write the value here.",
+          "scope": "window"
+        },
+        "codevis.describe.callerLines": {
+          "type": "number", "default": 6,
+          "description": "Lines of source around the call site sent to the model when you press Describe. Narrow is cheaper; widen only if the descriptions are weak."
+        },
+        "codevis.describe.maxDependencies": {
+          "type": "number", "default": 12,
+          "description": "Max dependency signatures included in the Describe context bundle, to bound token cost."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

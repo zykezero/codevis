@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watch-list manager</title>
+  <link href="/static/vendor/tabulator.min.css" rel="stylesheet">
+  <link href="/static/app.css" rel="stylesheet">
+</head>
+<body>
+  <header>
+    <div class="topbar">
+      <h1>Watch-list manager</h1>
+      <div class="appctl">
+        <span class="hint" id="save-status">all changes auto-saved</span>
+        <button id="save-now">Save</button>
+        <button id="shutdown" class="danger">⏻ Turn off app</button>
+      </div>
+    </div>
+    <nav id="tabs">
+      <button data-tab="newv">New</button>
+      <button data-tab="watch" class="on">Watch list</button>
+      <button data-tab="favorites">Favorites</button>
+      <button data-tab="links">Links</button>
+      <button data-tab="actors">Actors</button>
+      <button data-tab="actorpage">Actor</button>
+      <button data-tab="boards">Leaderboards</button>
+      <button data-tab="viz">Visualize</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="newv" class="tab">
+      <div class="toolbar">
+        <button id="paste-add" class="accent">Check &amp; add</button>
+        <button id="scrape">Scrape &amp; add to watch</button>
+        <span class="hint" id="new-hint"></span>
+      </div>
+      <textarea id="paste-box" rows="4" placeholder="paste newline-separated URLs…"></textarea>
+      <div id="paste-result"></div>
+
+      <h2>Add manually <span class="sub">one-off videos, no scraping</span></h2>
+      <div class="manual-grid">
+        <input id="m-url" placeholder="URL">
+        <input id="m-title" placeholder="Title / description">
+        <input id="m-stars" placeholder="actors, comma-separated">
+        <input id="m-tags" placeholder="tags, comma-separated">
+        <input id="m-wc" type="number" min="0" placeholder="watches" style="max-width:90px">
+        <input id="m-dw" placeholder="watched YYYY-MM-DD" style="max-width:150px">
+        <button id="m-dw-today" type="button">Today</button>
+        <label class="chk"><input id="m-later" type="checkbox"> watch later</label>
+        <button id="m-add" class="accent">Add to watch list</button>
+        <span class="hint" id="m-hint"></span>
+      </div>
+
+      <h2>New (unscraped)</h2>
+      <div id="t-new"></div>
+    </section>
+
+    <section id="watch" class="tab on">
+      <div class="toolbar">
+        <button id="re-rewatch">↻ Rewatch</button>
+        <button id="re-unwatched">↻ Unwatched</button>
+        <button id="open-sel" class="accent">Open selected ↗</button>
+        <button id="mark-sel">✓ Mark watched</button>
+        <span class="hint" id="watch-hint"></span>
+      </div>
+      <h2>Rewatch <span class="sub">status-4, weighted draw</span></h2>
+      <div id="t-rewatch"></div>
+      <h2>Unwatched <span class="sub">semi-random ranked</span></h2>
+      <div id="t-unwatched"></div>
+    </section>
+
+    <section id="actorpage" class="tab">
+      <div class="toolbar">
+        <button id="ap-back">← Back</button>
+        <h2 class="actor-title"><span id="actor-name">— click an actor's name —</span></h2>
+        <button id="ap-fav" class="tgl">☆ Favorite</button>
+        <input id="ap-search" placeholder="search this actor's videos…" autocomplete="off">
+      </div>
+      <h2>Favorites <span class="sub" id="ap-fav-n"></span></h2><div id="ap-favorites"></div>
+      <h2>Rewatch <span class="sub" id="ap-re-n"></span></h2><div id="ap-rewatch"></div>
+      <h2>Unwatched <span class="sub" id="ap-un-n"></span></h2><div id="ap-unwatched"></div>
+      <h2>Grave <span class="sub" id="ap-grave-n"></span></h2><div id="ap-grave"></div>
+    </section>
+
+    <section id="favorites" class="tab"><h2>Favorites</h2><div id="t-favorites"></div></section>
+
+    <section id="links" class="tab">
+      <div class="toolbar">
+        <input id="links-search" placeholder="search description / star…" autocomplete="off">
+        <select id="links-loc">
+          <option value="watch">watch</option><option value="grave">grave</option>
+          <option value="new">new</option><option value="all">all</option>
+        </select>
+        <span class="hint">status / favorite / watch-later / override are editable</span>
+      </div>
+      <div id="t-links"></div>
+    </section>
+
+    <section id="actors" class="tab">
+      <div class="toolbar"><input id="actors-search" placeholder="search actor…" autocomplete="off">
+        <span class="hint">gender / favorite / exclude are editable</span></div>
+      <div id="t-actors"></div>
+    </section>
+
+    <section id="boards" class="tab">
+      <div class="board-grid">
+        <div><h2>Top tags</h2><div id="t-tags"></div></div>
+        <div><h2>Top description terms</h2><div id="t-terms"></div></div>
+      </div>
+    </section>
+
+    <section id="viz" class="tab">
+      <div class="toolbar">
+        <button id="hl-god" class="tgl">Godtier actress</button>
+        <button id="hl-fav" class="tgl">Favorite video</button>
+        <button id="viz-reset">Reset view</button>
+        <span class="hint">drag to orbit · scroll to zoom · colour = composite score</span>
+      </div>
+      <div class="viz-wrap">
+        <canvas id="cube"></canvas>
+        <div class="viz-side">
+          <h2>Top actresses</h2><ol id="lb-actress" class="lb"></ol>
+          <h2>Top tags</h2><ol id="lb-tags" class="lb"></ol>
+        </div>
+      </div>
+    </section>
+
+    <section id="settings" class="tab">
+      <h2>Content analysis</h2>
+      <div class="toolbar">
+        <label><input type="radio" name="cmethod" value="tag"> Tag + description totals</label>
+        <label><input type="radio" name="cmethod" value="embed"> Semantic embeddings <span class="hint">meaning-aware, learns from your keeps vs graveyard</span></label>
+        <button id="rebuild-emb">Rebuild embeddings</button>
+        <span class="hint" id="emb-hint"></span>
+      </div>
+      <h2>Weights <span class="sub">rewatch = actor/content/date · unwatched drops date</span></h2>
+      <div id="weights" class="settings-grid"></div>
+      <button id="save-weights" class="accent">Save &amp; recompute</button>
+      <h2>Backups</h2>
+      <div class="toolbar"><select id="backup-list"></select><button id="restore">Restore selected</button>
+        <span class="hint">a snapshot is taken before every restore</span></div>
+    </section>
+  </main>
+
+  <script src="/static/vendor/tabulator.min.js"></script>
+  <script src="/static/tables.js"></script>
+  <script src="/static/explorer.js"></script>
+</body>
+</html>

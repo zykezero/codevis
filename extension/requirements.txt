@@ -1,0 +1,17 @@
+# ---- required: Python indexing -------------------------------------------
+# Jedi is why resolution works at all (85.7% on real code, zero false links) and
+# it is Python-only. This is the one hard dependency.
+jedi>=0.19
+
+# ---- required: SQL (tables/columns, incl. SQL embedded in Python strings) --
+sqlglot>=25.0
+
+# ---- OPTIONAL: R only ------------------------------------------------------
+# Nothing but the R front-end uses tree-sitter, and it is loaded lazily — a
+# Python/SQL project indexes fine without these installed.
+#
+# tree_sitter_languages has no wheel for Python 3.12+ (last release 2024), hence
+# the marker. On 3.12+ R indexing is unavailable until a maintained grammar
+# source is picked — see the note in the design doc.
+tree_sitter==0.21.3; python_version < "3.12"
+tree_sitter_languages>=1.10; python_version < "3.12"
