@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from schema import CONSUMES, HAS_COL, PRODUCES, READS_COL, WRITES_COL, Edge, Span, Symbol
 
-READERS = {"read_csv", "read.csv", "read_tsv", "read_parquet", "readRDS", "read_excel"}
-WRITERS = {"write_csv", "write.csv", "write_tsv", "saveRDS", "write_parquet"}
+READERS = {"read_csv", "read.csv", "read_tsv", "read_parquet", "readRDS", "read_excel",
+           "read_json", "fromJSON", "read_rds"}
+WRITERS = {"write_csv", "write.csv", "write_tsv", "saveRDS", "write_parquet",
+           "write_json", "write_rds"}
 NSE_VERBS = {"mutate", "filter", "select", "arrange", "group_by", "summarise", "summarize",
              "count", "slice_max", "slice_min", "distinct", "rename", "transmute", "pull",
              "drop_na", "desc"}

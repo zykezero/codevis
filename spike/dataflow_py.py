@@ -5,8 +5,11 @@ one producer and N consumers. The only difference is whether it crosses a
 process boundary. So both become `dataset` nodes.
 
 What is statically sound here, and what is not:
-  - sound: a literal filename in a read/write call; a column named by a string
-    literal; a local frame assigned from a call and passed onward.
+  - sound: a literal filename in a read/write call (pandas readers/writers, and
+    json/pickle/numpy file IO — including through a handle from `open("x.json")`);
+    a column named by a string literal; a local frame assigned from a call and
+    passed onward; a plain container (list/tuple/dict/set/ndarray) built from a
+    literal or constructor, or mutated with append/extend/insert/update.
   - NOT sound: following an unnamed frame across module boundaries. That needs
     the runtime trace (design notes D10), not the static index.
 """
@@ -19,6 +22,17 @@ from schema import CONSUMES, HAS_COL, PRODUCES, READS_COL, WRITES_COL, Edge, Spa
 
 READERS = {"read_csv", "read_parquet", "read_json", "read_excel", "read_table", "read_feather"}
 WRITERS = {"to_csv", "to_parquet", "to_excel", "to_json", "to_feather"}
+# module-qualified calls whose argument names a data FILE:
+#   json.load(open("x.json")), pickle.dump(obj, fh), np.save("x.npy", arr)
+MOD_READERS = {("json", "load"), ("pickle", "load"),
+               ("np", "load"), ("numpy", "load"),
+               ("np", "loadtxt"), ("numpy", "loadtxt"),
+               ("np", "genfromtxt"), ("numpy", "genfromtxt")}
+MOD_WRITERS = {("json", "dump"), ("pickle", "dump"),
+               ("np", "save"), ("numpy", "save"),
+               ("np", "savetxt"), ("numpy", "savetxt")}
+# no file involved, but assignment FROM these is still data evidence
+MOD_PARSERS = MOD_READERS | {("json", "loads"), ("pickle", "loads")}
 # pandas methods whose string arguments name columns
 COL_ARG_METHODS = {"sort_values", "groupby", "nlargest", "nsmallest", "drop_duplicates",
                    "set_index", "dropna", "value_counts", "sort_index", "unique"}
@@ -26,6 +40,14 @@ COL_ARG_METHODS = {"sort_values", "groupby", "nlargest", "nsmallest", "drop_dupl
 DF_METHODS = {"head", "tail", "describe", "merge", "join", "pivot", "pivot_table",
               "reset_index", "assign", "query", "iterrows", "itertuples", "melt",
               "to_dict", "copy", "fillna", "astype", "apply", "agg", "sample"}
+# plain containers are data products too: a list of rows, a dict of records, a
+# tuple of frames, an ndarray. Mutating one, or building one from a literal or
+# constructor, is observed data behaviour — `conn = connect()` still is not.
+CONTAINER_CTORS = {"list", "tuple", "dict", "set", "array", "asarray",
+                   "DataFrame", "Series"}
+CONTAINER_METHODS = {"append", "extend", "insert", "update"}
+CONTAINER_LITERALS = (ast.List, ast.Tuple, ast.Dict, ast.Set,
+                      ast.ListComp, ast.DictComp, ast.SetComp)
 
 
 def _filename_literals(node):
@@ -81,6 +103,29 @@ class _Scope:
         return None
 
 
+def _open_handles(fn, scope):
+    """Local names bound to a file handle over a literal path:
+    `with open("x.json") as f:` or `f = open("x.json")`. Lets json.load(f) /
+    pickle.dump(obj, f) resolve to the file the handle was opened on."""
+    out = {}
+
+    def bind(name_node, call):
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) \
+           and call.func.id == "open" and call.args \
+           and isinstance(name_node, ast.Name):
+            fname = scope.filename(call.args[0])
+            if fname:
+                out[name_node.id] = fname
+
+    for h in ast.walk(fn):
+        if isinstance(h, (ast.With, ast.AsyncWith)):
+            for item in h.items:
+                bind(item.optional_vars, item.context_expr)
+        if isinstance(h, ast.Assign) and len(h.targets) == 1:
+            bind(h.targets[0], h.value)
+    return out
+
+
 def _cols_from_subscript(sl):
     """df["a"]  ->  ["a"]        df[["a","b"]]  ->  ["a","b"]"""
     if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
@@ -102,23 +147,33 @@ def _data_evidence(fn):
     """
     ev = set()
     for n in ast.walk(fn):
-        # x["col"]  /  x[["a","b"]]
+        # x["col"]  /  x[["a","b"]]  (also a dict subscripted by string keys)
         if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name):
             if _cols_from_subscript(n.slice):
                 ev.add(n.value.id)
-        # x.groupby(...) / x.sort_values(...) / x.to_csv(...)
+        # x.groupby(...) / x.to_csv(...) / x.append(...) / x.extend(...)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
            and isinstance(n.func.value, ast.Name):
             if n.func.attr in COL_ARG_METHODS or n.func.attr in WRITERS \
-               or n.func.attr in DF_METHODS:
+               or n.func.attr in DF_METHODS or n.func.attr in CONTAINER_METHODS:
                 ev.add(n.func.value.id)
-        # x = pd.read_csv(...)
-        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) \
-           and isinstance(n.value.func, ast.Attribute) \
-           and n.value.func.attr in READERS:
-            for t in n.targets:
-                if isinstance(t, ast.Name):
-                    ev.add(t.id)
+        if isinstance(n, ast.Assign):
+            targets = [t.id for t in n.targets if isinstance(t, ast.Name)]
+            # x = [...] / (...) / {...} — a literal container IS data
+            if isinstance(n.value, CONTAINER_LITERALS):
+                ev.update(targets)
+            if isinstance(n.value, ast.Call):
+                f = n.value.func
+                # x = pd.read_csv(...) / json.load(...) / pickle.loads(...)
+                if isinstance(f, ast.Attribute) and (
+                        f.attr in READERS
+                        or (isinstance(f.value, ast.Name)
+                            and (f.value.id, f.attr) in MOD_PARSERS)):
+                    ev.update(targets)
+                # x = list(...) / dict(...) / np.array(...)
+                nm = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+                if nm in CONTAINER_CTORS:
+                    ev.update(targets)
     return ev
 
 
@@ -126,10 +181,12 @@ def _data_functions(trees):
     """Functions that demonstrably HANDLE data — the seed for propagation.
 
     A function is data-handling if it does column work on one of its own
-    parameters (`def f(df): df["x"]`). Evidence then propagates along calls:
-    what flows into a data function, and what comes out of one, is data too.
-    That is what keeps a clean pipeline (`cleaned = clean_dataset(raw)`) visible
-    without readmitting `conn = connect()`.
+    parameters (`def f(df): df["x"]`), or RETURNS a local it demonstrably
+    treated as data (`rows = []; rows.append(...); return rows`). Evidence then
+    propagates along calls: what flows into a data function, and what comes out
+    of one, is data too. That is what keeps a clean pipeline
+    (`cleaned = clean_dataset(raw)`) visible without readmitting
+    `conn = connect()`.
     """
     data_fns = set()
     for rel, tree in trees.items():
@@ -140,6 +197,12 @@ def _data_functions(trees):
             ev = _data_evidence(fn)
             if ev & params:
                 data_fns.add(fn.name)
+                continue
+            for r in ast.walk(fn):
+                if isinstance(r, ast.Return) and isinstance(r.value, ast.Name) \
+                   and r.value.id in ev:
+                    data_fns.add(fn.name)
+                    break
     return data_fns
 
 
@@ -257,6 +320,7 @@ def extract(idx, root, files, sym_ids):
             scope.enter(fn)
             sp = Span(rel, fn.lineno, 0, fn.lineno, 0)
             evidence = _propagate(fn, data_fns, _data_evidence(fn))
+            handles = _open_handles(fn, scope)
 
             for n in ast.walk(fn):
                 # ---- SQL hiding in a string literal --------------------------
@@ -288,6 +352,24 @@ def extract(idx, root, files, sym_ids):
                         if fname:
                             d = node("dataset", fname, fname, sp, "file")
                             add(d, fn_sid, CONSUMES, "reads file")
+                    # json.load(f) / pickle.dump(obj, f) / np.save("x.npy", a):
+                    # the file is named by a literal, a constant, or a handle
+                    # opened on one
+                    if isinstance(n.func.value, ast.Name):
+                        pair = (n.func.value.id, m)
+                        if pair in MOD_WRITERS or pair in MOD_READERS:
+                            fname = None
+                            for a in list(n.args) + [k.value for k in n.keywords]:
+                                fname = scope.filename(a) or \
+                                    (handles.get(a.id) if isinstance(a, ast.Name) else None)
+                                if fname:
+                                    break
+                            if fname:
+                                d = node("dataset", fname, fname, sp, "file")
+                                if pair in MOD_WRITERS:
+                                    add(fn_sid, d, PRODUCES, "writes file")
+                                else:
+                                    add(d, fn_sid, CONSUMES, "reads file")
                     # ---- columns named as string args -----------------------
                     if m in COL_ARG_METHODS:
                         for a in n.args:
