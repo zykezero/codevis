@@ -31,10 +31,13 @@ for cand in (HERE.parent, HERE.parent / "indexer"):
 else:
     raise SystemExit(f"could not find codevis.py near {HERE}")
 import codevis  # noqa: E402
+from schema import source_files  # noqa: E402
 
 
 def arm_raw(root: Path) -> str:
-    files = sorted(p for p in root.rglob("*.py") if "__pycache__" not in str(p))
+    # same discovery as the indexer: an in-tree .venv must not balloon the raw
+    # arm with third-party code, or the size comparison stops meaning anything
+    files = source_files(root, ".py")
     parts = [f"# Project: {root.name}", f"# {len(files)} Python files, verbatim.\n"]
     for f in files:
         parts.append(f"\n===== FILE: {f.relative_to(root).as_posix()} =====")

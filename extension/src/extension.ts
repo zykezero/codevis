@@ -188,23 +188,28 @@ export function activate(ctx: vscode.ExtensionContext) {
 
       // Build the bundle here rather than making the user remember two python
       // invocations and which directory to run them from.
-      const evalDir = path.join(ctx.extensionPath, 'eval');
+      const scriptsDir = path.join(ctx.extensionPath, 'eval');
+      // Outputs go to global storage, never the install directory: that is
+      // wiped on every update, may be read-only in managed installs, and
+      // writing into it can trip the editor's extension-integrity check.
+      const outDir = ctx.globalStorageUri.fsPath;
       const exe = await pythonPath();
       const cp = await import('child_process');
       const run = (script: string) => new Promise<void>((res, rej) =>
-        cp.execFile(exe, [path.join(evalDir, script), folder, evalDir],
+        cp.execFile(exe, [path.join(scriptsDir, script), folder, outDir],
           { maxBuffer: 64 * 1024 * 1024 },
           (err, _o, se) => err ? rej(new Error(`${script}: ${se || err.message}`)) : res()));
 
       const out = vscode.window.createOutputChannel('codevis eval');
       out.show(true);
       out.appendLine(`workspace: ${folder}`);
+      out.appendLine(`outputs: ${outDir}`);
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Window, title: 'codevis: building eval bundle…' },
         async () => { await run('facts.py'); await run('build_arms.py'); });
       out.appendLine('answer key + both arms built. asking the model…');
 
-      const report = await runEval(llm, evalDir, out);
+      const report = await runEval(llm, outDir, out);
       const doc = await vscode.workspace.openTextDocument({
         content: report, language: 'markdown' });
       await vscode.window.showTextDocument(doc, { preview: false });
