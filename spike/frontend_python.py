@@ -86,6 +86,7 @@ def build_index(root: Path) -> Index:
     # Jedi's get_names(definitions=True) also reports imported names as definitions,
     # which manufactures a phantom `log_step` symbol in every file that imports it.
     sym_by_loc = {}
+    module_of = {}      # relpath -> the file's <module> symbol id
     for f in files:
         rel = f.relative_to(root).as_posix()
         try:
@@ -93,6 +94,28 @@ def build_index(root: Path) -> Index:
         except SyntaxError:
             continue
         src_lines = texts[f].split("\n")
+
+        # THE MODULE BODY IS A CALLER.
+        #
+        # `backup.snapshot('cleanup-actors')` at top level runs when the file is
+        # imported or executed — it is every bit as much a call as one inside a
+        # function. But a call graph keyed on the enclosing FUNCTION has nowhere
+        # to hang it, so module-level calls used to vanish: the edge was only
+        # created `if ref.enclosing`, and module level has no enclosing function.
+        # The result was a graph that silently omitted real callers while the
+        # eval arm called itself "exhaustive", and cards that under-reported who
+        # calls a function.
+        #
+        # So give the module body a symbol to be. It is synthetic (kind
+        # "module", no body span), invisible in the web view, and excluded from
+        # dead-code and entry-point answers by kind — its whole job is to be a
+        # legitimate source for the edges that were being dropped.
+        mod_sid = f"{rel}::<module>"
+        idx.symbols.append(Symbol(
+            mod_sid, "<module>", "<module>", "module",
+            Span(rel, 1, 0, 1, 0), None,
+            "module-level code — runs when the file is imported or executed"))
+        module_of[rel] = mod_sid
 
         def visit(node, prefix, cls=None):
             for child in ast.iter_child_nodes(node):
@@ -153,9 +176,14 @@ def build_index(root: Path) -> Index:
             if s.body and s.span.file == rel_s and s.kind in ("function", "method")
         ]
 
+        # Falls back to the file's <module> symbol: a reference outside every
+        # function IS enclosed by something — the module body. None only when
+        # the file failed to parse and so has no module symbol to point at.
+        mod_sid = module_of.get(rel_s)
+
         def enclosing_of(line):
             hits = [(a, sid) for a, b, sid in scopes if a <= line <= b]
-            return max(hits, key=lambda t: t[0])[1] if hits else None
+            return max(hits, key=lambda t: t[0])[1] if hits else mod_sid
 
         for n in script.get_names(all_scopes=True, definitions=False, references=True):
             if n.is_definition():
@@ -208,13 +236,20 @@ def build_index(root: Path) -> Index:
                     e.call_sites.append(ref.span)
                     idx.edges.append(e)
 
-    # a symbol referenced from module level (a __main__ block, a route table, a
-    # registration call) has no in-project caller but is not dead either
-    module_level = {r.resolves_to for r in idx.references
-                    if r.enclosing is None and r.resolves_to}
-    for s in idx.symbols:
-        if s.id in module_level and s.kind in ("function", "method"):
-            s.entry = True
+    # `entry` is now DECORATOR-ONLY (set in pass 1).
+    #
+    # It used to also be set for anything referenced at module level, to stop a
+    # __main__ block's `main()` being reported as dead. That rule outlived its
+    # purpose the moment the module body became a real caller above: such a
+    # symbol now has a genuine in-project caller, so nothing calls it dead and
+    # nothing needs a flag to say otherwise.
+    #
+    # Worse, the rule was actively wrong. `entry` means "invoked by a framework,
+    # NOT by project code", and it was being set on symbols that project code
+    # plainly does call: backup.py::snapshot has eight callers and was still
+    # flagged. The eval arm then rendered both "ENTRY POINT — not called by
+    # project code" and "is called by: <eight functions>" about the same symbol,
+    # in the same document, and the model faithfully repeated the contradiction.
 
     # ---- pass 3: dataflow (datasets + columns) -------------------------------
     dataflow_py.extract(idx, root, files, {s.id for s in idx.symbols})

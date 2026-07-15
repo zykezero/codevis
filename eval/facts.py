@@ -117,8 +117,15 @@ def build(root: Path):
             continue
         Q.append({
             "id": f"callers_{name}",
+            # The key is `callers - {home}`, so the question must SAY that. It
+            # used to ask "which files call it" while quietly excluding the
+            # defining file — and `backup.py` genuinely calls its own
+            # `snapshot()` from a __main__ block, so an arm that answered
+            # correctly was marked spurious. An answer key is only ground truth
+            # if the question asks for what it measures.
             "question": f"The function `{name}` is defined in `{home}`. "
-                        f"Which files in this project call it? List file paths only.",
+                        f"Which OTHER files in this project call it? List file "
+                        f"paths only, and do not include `{home}` itself.",
             "answer": sorted(callers[name] - {home}),
             "why": f"{name} is called from files with no topical connection to "
                    f"{home}. Nothing about the question points you at them."
@@ -142,11 +149,17 @@ def build(root: Path):
                      for rel, _, dec in places if dec)
     Q.append({
         "id": "entry_points",
-        "question": "Which functions are invoked by a web framework or at import "
-                    "time, rather than being called by other code in this project? "
+        # The key is decorated functions only. The question used to also say "or
+        # at import time", which invited listing `main()` under a __main__ block
+        # — never in the key, so a reasonable answer scored as an invention.
+        # Import-time calls are now ordinary calls in the index (the module body
+        # is their caller), so the framework clause is the whole question.
+        "question": "Which functions are invoked by a web framework, rather than "
+                    "being called by other code in this project? "
                     "List each as 'file.py::function_name'.",
         "answer": entries,
-        "why": "A call graph cannot see these. Calling them dead is confidently wrong."
+        "why": "A call graph cannot see these — the framework calls them, so they "
+               "have no in-project caller. Calling them dead is confidently wrong."
     })
 
     return {

@@ -192,12 +192,14 @@ def main():
             if line[r.span.start_col:r.span.end_col] != r.text:
                 misaligned += 1
         # Span-text equality only applies to symbols whose NAME is a literal token
-        # in the source. Two kinds are exempt:
+        # in the source. Three kinds are exempt:
         #   - dataset/column nodes are synthetic (they name a data product)
+        #   - `module` nodes are synthetic (the file's import-time body; "<module>"
+        #     is not a token anywhere)
         #   - SQL statements are named by what they CREATE
         #     ("create_table_processed_iris"), which is not a token in the file.
         for s in idx.symbols:
-            if s.kind in ("dataset", "column"):
+            if s.kind in ("dataset", "column", "module"):
                 continue
             if idx.langs.get(s.span.file) == "sql":
                 continue
@@ -259,8 +261,10 @@ def main():
         # --- 4. dataflow edges connect sane node kinds -------------------------
         kind_of = {s.id: s.kind for s in idx.symbols}
         EXPECT = {
-            "calls":         ({"function", "method", "class"}, {"function", "method", "class"}),
-            "reads":         ({"function", "method", "class"}, {"variable"}),
+            # `module` is a legitimate caller: code at the top of a file runs on
+            # import and really does call things.
+            "calls":         ({"function", "method", "class", "module"}, {"function", "method", "class"}),
+            "reads":         ({"function", "method", "class", "module"}, {"variable"}),
             "produces":      ({"function", "method"},          {"dataset"}),
             "consumes":      ({"dataset"},                     {"function", "method"}),
             "reads_column":  ({"function", "method"},          {"column"}),

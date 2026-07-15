@@ -16,7 +16,7 @@ for (const r of INDEX.references) {
 // reader already knew what this tool counts as a "symbol". Name the groups and the
 // structure explains itself — no legend required.
 const KIND_MARK = { function: 'ƒ', method: 'm', class: 'C', variable: '=',
-                    dataset: '▤', column: '│' };
+                    dataset: '▤', column: '│', module: '▭' };
 
 const KIND_GROUP = [
   { kind: 'class',    label: 'classes',   hint: 'class definitions in this file' },
@@ -38,6 +38,10 @@ const DATA_GROUPS = [
 const byFile = {};
 for (const s of INDEX.symbols) {
   if (s.kind === 'dataset' || s.kind === 'column') continue;   // global, not per-file
+  // A file's `<module>` node exists so import-time calls have a caller to hang
+  // off. It is a graph fixture, not something to read — it has no body span,
+  // so an outline row for it would open an empty card.
+  if (s.kind === 'module') continue;
   (byFile[s.span.file] ||= []).push(s);
 }
 
@@ -598,7 +602,11 @@ const EDGE_KINDS = {
 };
 const NODE_KINDS = {
   function: { on: true }, method: { on: true }, class: { on: true },
-  dataset:  { on: true }, column: { on: true }, variable: { on: false }
+  dataset:  { on: true }, column: { on: true }, variable: { on: false },
+  // A file's import-time body. Off by default — it is structural, and one per
+  // file would clutter the web view — but toggleable, because "who actually
+  // calls this?" sometimes answers "the top of that script, on import".
+  module:   { on: false }
 };
 const SHOW = { frames: true };   // in-memory frames vs. files on disk
 
@@ -1020,11 +1028,14 @@ function drawGraph() {
   LAST = graphData();                       // selection traverses only what is visible
   const byId = new Map(nodes.map(n => [n.id, n]));
 
+  // Every kind in INDEX.symbols needs an entry: fullGraph() lays out the FULL
+  // node set regardless of the visibility filters, so a missing kind here is an
+  // undefined lookup and a blank page, not a hidden node.
   const NODE_STYLE = {
     function: { r: 6,  fill: '#6fa8ff' }, method: { r: 5, fill: '#6fa8ff' },
     class:    { r: 7,  fill: '#c678dd' },
     dataset:  { r: 8,  fill: '#57d9a3' }, column: { r: 4, fill: '#b48ce3' },
-    variable: { r: 4,  fill: '#7b8497' }
+    variable: { r: 4,  fill: '#7b8497' }, module: { r: 5, fill: '#8a94a6' }
   };
 
   const eSVG = edges.map(e => {

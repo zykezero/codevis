@@ -77,11 +77,18 @@ class Symbol:
     id: str                 # stable: "<file>::<qualname>"  — IDENTITY, never version
     name: str
     qualname: str
-    kind: str               # function | class | method | variable | dataset | column
+    kind: str               # function | class | method | variable | module | dataset | column
     span: Span              # the NAME token (where the cursor lands)
     body: Optional[Span] = None   # the WHOLE definition (what a card renders)
     doc: str = ""
-    entry: bool = False     # invoked by a framework or at module level, not by project code
+
+    # Invoked by a FRAMEWORK (a decorator), not by project code.
+    #
+    # Deliberately NOT set for symbols called from module level. That is a real
+    # call by real project code — the file's `<module>` symbol is its caller —
+    # so it needs no flag, and claiming "not called by project code" about a
+    # symbol with eight callers is a lie the eval caught us telling.
+    entry: bool = False
     changed: bool = False   # git: the diff touches this symbol's body
     impact: int = -1        # git: hops from the nearest changed symbol (0 = itself, -1 = untouched)
 
@@ -108,7 +115,10 @@ class Reference:
     resolves_to: Optional[str] = None   # Symbol.id, or None — a first-class outcome
     target_kind: str = "unresolved"     # project | local | external | unresolved
     confidence: float = 0.0
-    enclosing: Optional[str] = None     # Symbol.id of the function containing this ref
+    # Symbol.id of the function containing this ref — or the file's `<module>`
+    # symbol when the ref sits outside every function (module-level code is
+    # enclosed by the module body, not by nothing).
+    enclosing: Optional[str] = None
 
 
 @dataclass
