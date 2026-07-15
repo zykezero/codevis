@@ -12,17 +12,20 @@ pip install jedi sqlglot
 That is everything you need for Python and SQL projects, which includes
 `demo_project`.
 
-**R is optional and currently unavailable on Python 3.12+.** Only the R front-end
-uses tree-sitter, and it loads lazily — a Python/SQL project indexes fine without
-it. If you want R and you are on Python 3.11 or older:
+**R is optional.** Only the R front-end uses tree-sitter and it loads lazily — a
+Python/SQL project indexes fine without it. If you want R:
 
 ```
-pip install tree_sitter==0.21.3 tree_sitter_languages
+pip install tree_sitter_language_pack
 ```
 
-On 3.12+ `tree_sitter_languages` has no wheel (its last release predates 3.12).
-Indexing an R project on 3.12+ fails with an explicit message rather than
-mysteriously; a Python-only project is unaffected.
+This works on current Python. It replaces `tree_sitter_languages`, which was
+abandoned before 3.12 and so could not be installed at all on a modern
+interpreter — R indexing used to be unavailable in practice. The replacement
+ships a newer R grammar whose node names differ, so the grammar knowledge is
+isolated in `spike/r_grammar.py`; `test_render.py` now indexes `fixtures/r_demo`
+on every run, because a grammar rename fails silently (empty index, no error)
+rather than loudly.
 
 Check it works *before* touching VS Code — if this prints JSON, the hard part is done:
 

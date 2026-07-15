@@ -12,9 +12,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from tree_sitter_languages import get_parser
+from tree_sitter_language_pack import get_parser
 
 import dataflow_r
+from r_grammar import is_assign, is_fn_assign, is_named_arg, param_idents
 from schema import Edge, Index, Reference, Span, Symbol, source_files
 
 PARSER = get_parser("r")
@@ -125,7 +126,7 @@ def build_index(root: Path) -> Index:
         lines = src.decode("utf8", "replace").split("\n")
         rel = f.relative_to(root).as_posix()
         for n in tree.root_node.children:      # TOP LEVEL ONLY — see note below
-            if n.type != "left_assignment":
+            if not is_assign(n):
                 continue
             lhs, rhs = n.children[0], n.children[-1]
             if lhs.type != "identifier":
@@ -149,6 +150,21 @@ def build_index(root: Path) -> Index:
             per_file.setdefault(rel, {})[name] = sid
             kind_of[sid] = kind
 
+    # ---- the file body is a caller ------------------------------------------
+    # Same reasoning as the Python front-end: `publish(cleaned)` at the top of a
+    # script runs when the file is sourced, and is a real call. R leans on this
+    # far harder than Python does — source()-into-global-env means top level IS
+    # the program — so dropping those edges cost R more than it cost Python.
+    module_of = {}
+    for f in files:
+        rel = f.relative_to(root).as_posix()
+        sid = f"{rel}::<module>"
+        idx.symbols.append(Symbol(
+            sid, "<module>", "<module>", "module",
+            Span(rel, 1, 0, 1, 0), None,
+            "top-level code — runs when the file is sourced or executed"))
+        module_of[rel] = sid
+
     # ---- pass 2: references, resolved against local scope then global table ---
     for f in files:
         src, tree = sources[f], trees[f]
@@ -158,8 +174,7 @@ def build_index(root: Path) -> Index:
         # named functions: map a function_definition back to the name it was bound to
         named = {}
         for n in _walk(tree.root_node):
-            if n.type == "left_assignment" and n.children[0].type == "identifier" \
-               and n.children[-1].type == "function_definition":
+            if is_fn_assign(n) and n.children[0].type == "identifier":
                 named[n.children[-1].id] = f"{rel}::{_txt(src, n.children[0])}"
 
         # EVERY function_definition is a scope — including closures and lambdas
@@ -169,13 +184,10 @@ def build_index(root: Path) -> Index:
                 continue
             locals_ = set()
             for p in _walk(fd):
-                if p.type == "formal_parameters":
-                    for c in p.children:
-                        if c.type == "identifier":
-                            locals_.add(_txt(src, c))
-                        elif c.type == "default_parameter" and c.children:
-                            locals_.add(_txt(src, c.children[0]))
-                if p.type == "left_assignment" and p.children[0].type == "identifier":
+                if p.type == "parameters":
+                    for ident in param_idents(p):
+                        locals_.add(_txt(src, ident))
+                if is_assign(p) and p.children[0].type == "identifier":
                     locals_.add(_txt(src, p.children[0]))
                 if p.type in ("for", "for_statement"):
                     for c in p.children:
@@ -197,21 +209,20 @@ def build_index(root: Path) -> Index:
                 cands = [(s, sid) for s, e, sid, _ in fdefs
                          if s <= node.start_byte < e and sid]
                 named_sid = max(cands, key=lambda t: t[0])[1] if cands else None
-            return named_sid, all_locals
+            # Outside every named function, the enclosing symbol is the file
+            # body itself — not nothing.
+            return named_sid or module_of.get(rel), all_locals
 
         # definition LHS identifiers are not references
         def_lhs = set()
         for n in _walk(tree.root_node):
-            if n.type == "left_assignment" and n.children[0].type == "identifier":
+            if is_assign(n) and n.children[0].type == "identifier":
                 def_lhs.add(n.children[0].id)
-            if n.type == "formal_parameters":
-                for c in n.children:
-                    if c.type == "identifier":
-                        def_lhs.add(c.id)
-                    elif c.type == "default_parameter" and c.children:
-                        def_lhs.add(c.children[0].id)
+            if n.type == "parameters":
+                for ident in param_idents(n):
+                    def_lhs.add(ident.id)
             # `f(show_col_types = FALSE)` — the key is an argument NAME, not a reference
-            if n.type == "default_argument" and n.children:
+            if is_named_arg(n):
                 def_lhs.add(n.children[0].id)
 
         for n in _walk(tree.root_node):
@@ -219,7 +230,8 @@ def build_index(root: Path) -> Index:
                 continue
             # skip `$` field access on the rhs (rec$record) and named call args
             par = n.parent
-            if par is not None and par.type in ("dollar", "extract_operator") and par.children[-1].id == n.id:
+            if par is not None and par.type in ("dollar", "extract_operator") \
+               and par.children[-1].id == n.id:
                 continue
 
             text = _txt(src, n)
@@ -255,11 +267,15 @@ def build_index(root: Path) -> Index:
                     e.call_sites.append(ref.span)
                     idx.edges.append(e)
 
-    module_level = {ref.resolves_to for ref in idx.references
-                    if ref.enclosing is None and ref.resolves_to}
-    for s in idx.symbols:
-        if s.id in module_level and s.kind == "function":
-            s.entry = True
+    # No `entry` flag in R, deliberately.
+    #
+    # It used to be set for anything referenced at top level, to stop those
+    # functions being reported dead. The <module> symbol above now gives them a
+    # real caller, so the flag has nothing left to protect — and R has no
+    # decorators, so there is no such thing as a framework-invoked R function to
+    # flag in the first place. `entry` means "invoked by a framework, not by
+    # project code"; in R that set is empty, and saying so beats overloading the
+    # flag to mean something else.
 
     # ---- pass 3: dataflow (datasets + columns) -------------------------------
     dataflow_r.extract(idx, root, sources, trees, _txt, _walk, _span, globals_,

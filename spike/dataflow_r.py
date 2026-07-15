@@ -9,6 +9,8 @@ R makes two things easier and one harder:
 """
 from __future__ import annotations
 
+from r_grammar import (arg_value, has_default, is_assign, is_fn_assign,
+                       is_named_arg, param_idents)
 from schema import CONSUMES, HAS_COL, PRODUCES, READS_COL, WRITES_COL, Edge, Span, Symbol
 
 READERS = {"read_csv", "read.csv", "read_tsv", "read_parquet", "readRDS", "read_excel",
@@ -38,13 +40,10 @@ def _locals_of(body, txt, walk, src):
     """Params and local assignments — a local variable is not a column."""
     out = set()
     for p in walk(body):
-        if p.type == "formal_parameters":
-            for c in p.children:
-                if c.type == "identifier":
-                    out.add(txt(src, c))
-                elif c.type == "default_parameter" and c.children:
-                    out.add(txt(src, c.children[0]))
-        if p.type == "left_assignment" and p.children[0].type == "identifier":
+        if p.type == "parameters":
+            for ident in param_idents(p):
+                out.add(txt(src, ident))
+        if is_assign(p) and p.children[0].type == "identifier":
             out.add(txt(src, p.children[0]))
         if p.type in ("for", "for_statement"):
             for c in p.children:
@@ -88,7 +87,7 @@ def extract(idx, root, sources, trees, txt, walk, span, globals_, known_external
     for f, tree in trees.items():
         src = sources[f]
         for n in tree.root_node.children:
-            if n.type == "left_assignment" and n.children[0].type == "identifier":
+            if is_assign(n) and n.children[0].type == "identifier":
                 rhs = n.children[-1]
                 if rhs.type == "string":
                     v = txt(src, rhs).strip('"\'')
@@ -96,6 +95,9 @@ def extract(idx, root, sources, trees, txt, walk, span, globals_, known_external
                         consts[txt(src, n.children[0])] = v.split("/")[-1]
 
     def filename(src, arg_node, defaults):
+        # `arguments` wraps every entry in an `argument` node, so unwrap to the
+        # value before matching — the old grammar handed us the value directly.
+        arg_node = arg_value(arg_node)
         if arg_node.type == "string":
             v = txt(src, arg_node).strip('"\'')
             return v.split("/")[-1] if "." in v else None
@@ -109,7 +111,7 @@ def extract(idx, root, sources, trees, txt, walk, span, globals_, known_external
         rel = f.relative_to(root).as_posix()
 
         for fd in walk(tree.root_node):
-            if fd.type != "left_assignment" or fd.children[-1].type != "function_definition":
+            if not is_fn_assign(fd):
                 continue
             fn_name = txt(src, fd.children[0])
             fn_sid = f"{rel}::{fn_name}"
@@ -120,10 +122,11 @@ def extract(idx, root, sources, trees, txt, walk, span, globals_, known_external
             # parameter defaults that point at a filename constant
             defaults = {}
             for p in walk(body):
-                if p.type == "default_parameter" and p.children:
+                # `parameter` covers both `df` and `path = "x.csv"`; only the
+                # latter has an `=` and a value to read a filename out of.
+                if has_default(p):
                     nm = txt(src, p.children[0])
-                    val = p.children[-1]
-                    fnm = filename(src, val, {})
+                    fnm = filename(src, p.children[-1], {})
                     if fnm:
                         defaults[nm] = fnm
 
@@ -154,15 +157,14 @@ def extract(idx, root, sources, trees, txt, walk, span, globals_, known_external
                             if a.type != "identifier" or a.id == n.children[0].id:
                                 continue
                             nm = txt(src, a)
-                            is_named_arg = (a.parent is not None
-                                            and a.parent.type == "default_argument"
-                                            and a.parent.children[0].id == a.id)
-                            if is_named_arg and callee in ("mutate", "transmute", "rename"):
+                            named = (is_named_arg(a.parent)
+                                     and a.parent.children[0].id == a.id)
+                            if named and callee in ("mutate", "transmute", "rename"):
                                 # `mutate(sepal_ratio = ...)` CREATES a column
                                 if nm not in NOT_COLUMNS and not nm.startswith("."):
                                     add(fn_sid, node("column", nm, nm, sp), WRITES_COL)
                                 continue
-                            if is_named_arg:
+                            if named:
                                 continue          # `n = 5`, `.groups = "drop"` — argument names
                             if not is_column(nm, a, locals_):
                                 continue
@@ -177,7 +179,7 @@ def extract(idx, root, sources, trees, txt, walk, span, globals_, known_external
                             add(fn_sid, node("column", nm, nm, sp), READS_COL)
 
                 # ---- named frames handed between functions --------------------
-                if n.type == "left_assignment" and n.children[0].type == "identifier":
+                if is_assign(n) and n.children[0].type == "identifier":
                     rhs = n.children[-1]
                     if rhs.type == "call" and rhs.children and rhs.children[0].type == "identifier":
                         callee = txt(src, rhs.children[0])

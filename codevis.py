@@ -32,14 +32,19 @@ from schema import Index, source_files  # noqa: E402
 # as the false links: making a hard requirement out of weak evidence.
 FRONTENDS = {
     "python": ("frontend_python", ".py", "jedi"),
-    "r":      ("frontend_r", ".r", "tree_sitter_languages"),
+    "r":      ("frontend_r", ".r", "tree_sitter_language_pack"),
     "sql":    ("frontend_sql", ".sql", "sqlglot"),
 }
 
 PIP_HINT = {
     "jedi": "jedi",
     "sqlglot": "sqlglot",
-    "tree_sitter_languages": 'tree_sitter==0.21.3 "tree_sitter_languages; python_version<\'3.12\'"',
+    # Was tree_sitter_languages, which is abandoned: its last release predates
+    # Python 3.12, so it cannot be installed on any current interpreter and R
+    # was effectively dead. tree_sitter_language_pack is the maintained
+    # successor and ships a NEWER r grammar with different node names — see the
+    # adapters at the top of frontend_r.py.
+    "tree_sitter_language_pack": "tree_sitter_language_pack",
 }
 
 
